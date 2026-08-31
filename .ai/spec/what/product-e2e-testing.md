@@ -119,6 +119,47 @@ responsibility via LLM judge.
 - [PLANNED] Failure scenario tests: verify graceful handling when the LLM
   cannot diagnose the problem (phase reaches Failed or Escalated)
 
+## Multicluster e2e (agentic-operator share)
+
+The operator participates in the cross-repo **multicluster test suite** that
+validates hub-managed fleet operations. The suite's tier definitions, ownership
+split, and shared kubeconfig contract live in the parent spec
+(`ols/.ai/spec/what/multicluster-testing.md`); the primary owner and its
+mechanics are in `lightspeed-hub/.ai/spec/what/multicluster-testing.md`. This
+section records the operator's share.
+
+### Scope
+
+- **In scope:** `spec.targetCluster` reconcile, ephemeral SA creation on a
+  *separate* spoke apiserver (24h bound token via the TokenRequest API),
+  cross-cluster cleanup (finalizer removes spoke-side resources; resources carry
+  `hub.openshift.io/spoke-cluster` and `hub.openshift.io/agentic-run` labels; the
+  periodic stale-SA sweep runs), and sandbox wiring against a real spoke.
+- **T1** asserts a full AgenticRun lifecycle with the **mock agent** against a
+  real spoke reaches `Completed`, and that the ephemeral token is RBAC-scoped
+  (succeeds inside `targetNamespaces`, denied outside).
+- **T2** reuses the phase-transition assertions above (Pending → Analyzing →
+  Proposed → Executing → Verifying → Completed) against a real hosted spoke with
+  a real provider.
+- **Out of scope:** same boundary as the troubleshooting scenarios above —
+  sandbox output quality and behavioral correctness of fixes.
+
+### Build tag
+
+Distinct from this repo's `e2e` / `product_e2e` tags:
+
+```go
+//go:build mc_e2e           // T1
+//go:build mc_product_e2e   // T2
+```
+
+### Operator risk paths (CI gating)
+
+T1 MUST run per-PR and block merge when a PR touches: `targetCluster` reconcile,
+ephemeral-SA and cross-cluster-cleanup code, sandbox wiring, or the `mc_e2e`
+tests. It MAY be skipped otherwise (Prow `run_if_changed`; regex lives in
+`openshift/release`).
+
 ## Commands
 
 ```bash
