@@ -174,6 +174,26 @@ func TestGetStageOverrideAgent_OmittedMeansNoOverride(t *testing.T) {
 	}
 }
 
+func TestEffectiveStepAgentName_EscalationFallbackAndOverride(t *testing.T) {
+	analysis := agenticv1alpha1.AgenticRunStep{Agent: "analysis-agent"}
+	approval := &agenticv1alpha1.AgenticRunApproval{Spec: agenticv1alpha1.AgenticRunApprovalSpec{
+		Stages: []agenticv1alpha1.ApprovalStage{
+			agenticv1alpha1.NewApprovalStage(agenticv1alpha1.ApprovalStageAnalysis, "", "analysis-override", nil),
+		},
+	}}
+	if got := effectiveStepAgentName(approval, agenticv1alpha1.SandboxStepAnalysis, analysis); got != "analysis-override" {
+		t.Fatalf("analysis override = %q, want analysis-override", got)
+	}
+	if got := effectiveStepAgentName(approval, agenticv1alpha1.SandboxStepEscalation, analysis); got != "analysis-agent" {
+		t.Fatalf("escalation fallback = %q, want analysis-agent", got)
+	}
+	approval.Spec.Stages = append(approval.Spec.Stages,
+		agenticv1alpha1.NewApprovalStage(agenticv1alpha1.ApprovalStageEscalation, "", "escalation-agent", nil))
+	if got := getStageOverrideAgent(approval, agenticv1alpha1.SandboxStepEscalation); got != "escalation-agent" {
+		t.Fatalf("escalation override = %q, want escalation-agent", got)
+	}
+}
+
 func TestGetStageOption_FromApproval(t *testing.T) {
 	option := int32(2)
 	approval := &agenticv1alpha1.AgenticRunApproval{

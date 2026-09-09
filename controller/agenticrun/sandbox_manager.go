@@ -156,6 +156,9 @@ func (m *SandboxManager) Create(
 	}
 	span.AddEvent("sandbox.rbac.created")
 
+	timeoutSecs := resolveTimeout(agent, step)
+	maxTurns := resolveMaxTurns(agent)
+
 	podSpec, err := m.builder.Build(
 		cfg.Sandbox.PodSpec,
 		agent,
@@ -168,6 +171,8 @@ func (m *SandboxManager) Create(
 		serviceAccount,
 		inputCM.Name,
 		traceparentFromContext(ctx),
+		timeoutSecs,
+		maxTurns,
 	)
 	if err != nil {
 		createErr = fmt.Errorf("%s: %w", errBuildPodSpec, err)

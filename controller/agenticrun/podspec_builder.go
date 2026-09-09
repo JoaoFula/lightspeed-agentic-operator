@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 
 	"go.opentelemetry.io/otel/trace"
@@ -59,6 +60,8 @@ type PodSpecBuilder struct{}
 // inputConfigMapName is mounted read-only at /input/ (OLS-3794 batch model).
 // The base PodSpec must contain at least one container (the agent container).
 // HTTP readiness/liveness probes are not set — batch sandboxes have no HTTP server.
+// timeoutSeconds and maxTurns are injected as LIGHTSPEED_AGENT_TIMEOUT_SECONDS
+// and LIGHTSPEED_AGENT_MAX_TURNS env vars for cooperative timeout enforcement.
 func (b *PodSpecBuilder) Build(
 	base *corev1.PodSpec,
 	agent *agenticv1alpha1.Agent,
@@ -71,6 +74,8 @@ func (b *PodSpecBuilder) Build(
 	serviceAccount string,
 	inputConfigMapName string,
 	traceparent string,
+	timeoutSeconds int,
+	maxTurns int,
 ) (*corev1.PodSpec, error) {
 	if base == nil || len(base.Containers) == 0 {
 		return nil, fmt.Errorf("%s", ErrBuildBasePodSpec)
@@ -100,6 +105,8 @@ func (b *PodSpecBuilder) Build(
 	container.Env = append(container.Env,
 		corev1.EnvVar{Name: "LIGHTSPEED_PROVIDER", Value: providerTypeString(llm.Spec.Type)},
 		corev1.EnvVar{Name: "LIGHTSPEED_MODEL", Value: agent.Spec.Model},
+		corev1.EnvVar{Name: "LIGHTSPEED_AGENT_TIMEOUT_SECONDS", Value: strconv.Itoa(timeoutSeconds)},
+		corev1.EnvVar{Name: "LIGHTSPEED_AGENT_MAX_TURNS", Value: strconv.Itoa(maxTurns)},
 	)
 	b.addProviderSpecificEnv(container, llm)
 

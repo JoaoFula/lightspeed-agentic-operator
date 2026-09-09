@@ -22,33 +22,37 @@ import (
 )
 
 // AgentTimeouts configures per-step and per-turn timeout limits.
-// All values are in seconds.
+// All values are in seconds. Zero or omitted values use built-in defaults.
 //
 // +kubebuilder:validation:MinProperties=1
 type AgentTimeouts struct {
 	// analysisSeconds is the timeout for the analysis step in seconds.
+	// When zero or omitted, the default (600 seconds) is used.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=3600
 	AnalysisSeconds int32 `json:"analysisSeconds,omitempty"`
 
 	// executionSeconds is the timeout for the execution step in seconds.
+	// When zero or omitted, the default (600 seconds) is used.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=3600
 	ExecutionSeconds int32 `json:"executionSeconds,omitempty"`
 
 	// verificationSeconds is the timeout for the verification step in seconds.
+	// When zero or omitted, the default (1800 seconds) is used.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=3600
 	VerificationSeconds int32 `json:"verificationSeconds,omitempty"`
 
-	// chatSeconds is the timeout for each chat turn with the LLM in seconds.
+	// escalationSeconds is the timeout for the escalation step in seconds.
+	// When zero or omitted, the default (600 seconds) is used.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=600
-	ChatSeconds int32 `json:"chatSeconds,omitempty"`
+	// +kubebuilder:validation:Maximum=3600
+	EscalationSeconds int32 `json:"escalationSeconds,omitempty"`
 }
 
 // StepInstructions holds the system and user prompt instructions for a single step.
@@ -117,7 +121,7 @@ type AgentSpec struct {
 
 	// maxTurns is the maximum number of tool-use turns the agent may take
 	// in a single step invocation. Prevents runaway loops.
-	// When omitted, the agent sandbox uses its built-in default.
+	// When zero or omitted, the default (200) is used.
 	// Minimum 1, maximum 500.
 	// +optional
 	// +kubebuilder:validation:Minimum=1

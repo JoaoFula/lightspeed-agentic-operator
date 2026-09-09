@@ -188,7 +188,7 @@ spec:
                 description: |-
                   maxTurns is the maximum number of tool-use turns the agent may take
                   in a single step invocation. Prevents runaway loops.
-                  When omitted, the agent sandbox uses its built-in default.
+                  When zero or omitted, the default (200) is used.
                   Minimum 1, maximum 500.
                 format: int32
                 maximum: 500
@@ -232,29 +232,33 @@ spec:
                 minProperties: 1
                 properties:
                   analysisSeconds:
-                    description: analysisSeconds is the timeout for the analysis step
-                      in seconds.
+                    description: |-
+                      analysisSeconds is the timeout for the analysis step in seconds.
+                      When zero or omitted, the default (600 seconds) is used.
                     format: int32
                     maximum: 3600
                     minimum: 1
                     type: integer
-                  chatSeconds:
-                    description: chatSeconds is the timeout for each chat turn with
-                      the LLM in seconds.
+                  escalationSeconds:
+                    description: |-
+                      escalationSeconds is the timeout for the escalation step in seconds.
+                      When zero or omitted, the default (600 seconds) is used.
                     format: int32
-                    maximum: 600
+                    maximum: 3600
                     minimum: 1
                     type: integer
                   executionSeconds:
-                    description: executionSeconds is the timeout for the execution
-                      step in seconds.
+                    description: |-
+                      executionSeconds is the timeout for the execution step in seconds.
+                      When zero or omitted, the default (600 seconds) is used.
                     format: int32
                     maximum: 3600
                     minimum: 1
                     type: integer
                   verificationSeconds:
-                    description: verificationSeconds is the timeout for the verification
-                      step in seconds.
+                    description: |-
+                      verificationSeconds is the timeout for the verification step in seconds.
+                      When zero or omitted, the default (1800 seconds) is used.
                     format: int32
                     maximum: 3600
                     minimum: 1
