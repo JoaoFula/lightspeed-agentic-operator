@@ -13,7 +13,10 @@ import (
 )
 
 const (
-	defaultSandboxTimeout = 5 * time.Minute
+	// activeDeadlineSeconds is measured from pod creation. The operator
+	// separately enforces the startup and startedAt-based running deadlines.
+	sandboxStartupTimeout = 5 * time.Minute
+	sandboxRunningGrace   = 1 * time.Minute
 
 	analysisStepTimeout     = 10 * time.Minute
 	executionStepTimeout    = 10 * time.Minute
@@ -25,11 +28,13 @@ const (
 	// Spec: .ai/spec/what/sandbox-execution.md, .ai/spec/what/run-lifecycle.md rule 14a.
 
 	// Step condition reasons (run-lifecycle.md rule 14a).
-	ReasonWaitingForSandbox = "WaitingForSandbox"
-	ReasonRunning           = "Running"
-	ReasonSucceeded         = "Succeeded"
-	ReasonSandboxTimeout    = "SandboxTimeout"
-	ReasonSandboxFailed     = "SandboxFailed"
+	ReasonWaitingForSandbox     = "WaitingForSandbox"
+	ReasonRunning               = "Running"
+	ReasonSucceeded             = "Succeeded"
+	ReasonSandboxTimeout        = "SandboxTimeout"
+	ReasonSandboxStartupTimeout = "SandboxStartupTimeout"
+	ReasonSandboxFailed         = "SandboxFailed"
+	ReasonAgentTimeout          = "AgentTimeout"
 
 	// Pod start timeout — covers image pull, scheduling, resource limits, etc.
 	podStartTimeout = 5 * time.Minute
@@ -153,6 +158,10 @@ func (s *SandboxAgentCaller) Escalate(ctx context.Context, run *agenticv1alpha1.
 	return s.launchSandbox(ctx, run, stepString(agenticv1alpha1.SandboxStepEscalation), step, buildAgentContext(run))
 }
 
+func sandboxPodDeadline(agent *agenticv1alpha1.Agent, step string) time.Duration {
+	return sandboxStartupTimeout + time.Duration(resolveTimeout(agent, step))*time.Second + sandboxRunningGrace
+}
+
 // launchSandbox delegates to SandboxLifecycle.Create which handles all setup
 // (ConfigMap, SA, RBAC, pod) and patches the sandbox info on the status.
 func (s *SandboxAgentCaller) launchSandbox(
@@ -162,7 +171,12 @@ func (s *SandboxAgentCaller) launchSandbox(
 	step resolvedStep,
 	agentCtx *agentContext,
 ) error {
-	podDeadline := stepTimeout(stepName) + defaultSandboxTimeout
+	// activeDeadlineSeconds is measured from pod creation, while the product
+	// running deadline starts at the main container's startedAt. Include the
+	// complete startup allowance here so Kubernetes cannot kill a pod before
+	// the operator's timestamp-derived deadline. The operator still enforces
+	// the precise startup/running clocks in timeout_handler.go.
+	podDeadline := sandboxPodDeadline(step.Agent, stepName)
 	var name string
 	if err := retryOnTransient(ctx, func() error {
 		var createErr error

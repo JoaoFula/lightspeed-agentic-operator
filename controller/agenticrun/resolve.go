@@ -68,10 +68,7 @@ func resolveAgenticRun(ctx context.Context, c client.Client, run *agenticv1alpha
 	}
 
 	effectiveAgent := func(stage agenticv1alpha1.SandboxStep, step agenticv1alpha1.AgenticRunStep) string {
-		if override := getStageOverrideAgent(approval, stage); override != "" {
-			return override
-		}
-		return stepAgentName(step)
+		return effectiveStepAgentName(approval, stage, step)
 	}
 
 	resolved := &resolvedWorkflow{}
@@ -106,4 +103,14 @@ func stepAgentName(step agenticv1alpha1.AgenticRunStep) string {
 		return step.Agent
 	}
 	return "default"
+}
+
+// effectiveStepAgentName is the single source of truth for selecting a stage's
+// Agent. Timeout enforcement and sandbox launch must use the same override
+// resolution.
+func effectiveStepAgentName(approval *agenticv1alpha1.AgenticRunApproval, stage agenticv1alpha1.SandboxStep, step agenticv1alpha1.AgenticRunStep) string {
+	if override := getStageOverrideAgent(approval, stage); override != "" {
+		return override
+	}
+	return stepAgentName(step)
 }

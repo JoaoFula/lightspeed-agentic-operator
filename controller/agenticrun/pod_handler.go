@@ -66,7 +66,7 @@ func (r *AgenticRunReconciler) handlePodEvent(ctx context.Context, obj client.Ob
 		return nil
 	}
 
-	if err := r.completeStep(ctx, &run, pod, step, condType, ""); err != nil {
+	if err := r.completeStep(ctx, &run, pod, step, condType, "", ""); err != nil {
 		return nil
 	}
 	return nil
@@ -111,10 +111,11 @@ func resolveSandboxPodMetadata(ctx context.Context, c client.Client, pod *corev1
 
 // completeStep handles step completion: patches the step condition (and result ref
 // on success), emits audit events, and releases the sandbox. When timeoutMsg is
-// non-empty the pod phase is ignored and a timeout failure is recorded. Returns an
-// error if the status patch fails — the caller should bail so the timeout loop
+// non-empty the pod phase is ignored and a timeout failure is recorded. The timeoutReason
+// specifies which timeout condition occurred (e.g., ReasonSandboxStartupTimeout or ReasonSandboxTimeout).
+// Returns an error if the status patch fails — the caller should bail so the timeout loop
 // can retry.
-func (r *AgenticRunReconciler) completeStep(ctx context.Context, run *agenticv1alpha1.AgenticRun, pod *corev1.Pod, step, condType, timeoutMsg string) error {
+func (r *AgenticRunReconciler) completeStep(ctx context.Context, run *agenticv1alpha1.AgenticRun, pod *corev1.Pod, step, condType, timeoutMsg, timeoutReason string) error {
 	stepCondMu.Lock()
 	defer stepCondMu.Unlock()
 
@@ -128,7 +129,10 @@ func (r *AgenticRunReconciler) completeStep(ctx context.Context, run *agenticv1a
 
 	if timeoutMsg != "" {
 		log.Info("sandbox timeout", "message", timeoutMsg)
-		patchErr = r.patchStepCondition(ctx, run, condType, metav1.ConditionFalse, ReasonSandboxTimeout, timeoutMsg)
+		if timeoutReason == "" {
+			timeoutReason = ReasonSandboxTimeout
+		}
+		patchErr = r.patchStepCondition(ctx, run, condType, metav1.ConditionFalse, timeoutReason, timeoutMsg)
 	} else if pod.Status.Phase == corev1.PodSucceeded {
 		var reason string
 		resultCR, reason = validateResultCR(ctx, r.Client, run, step, r.Namespace)
@@ -146,7 +150,15 @@ func (r *AgenticRunReconciler) completeStep(ctx context.Context, run *agenticv1a
 				metav1.ConditionTrue, stepReason, stepMsg)
 		} else if resultCR != nil {
 			log.Info("agent reported failure", "reason", reason)
-			if step == "verification" {
+			if reason == agenticv1alpha1.ResultReasonAgentTimeout && step == "verification" {
+				// A verification timeout is an agent outcome, not a sandbox
+				// infrastructure failure. Route it through the existing escalation
+				// path so a human can review the incomplete verification.
+				patchErr = r.patchVerificationFailedEscalating(ctx, run, resultCR.GetName(), resultCR, reason)
+			} else if reason == agenticv1alpha1.ResultReasonAgentTimeout {
+				patchErr = r.patchStepResult(ctx, run, step, condType, resultCR.GetName(), resultCR,
+					metav1.ConditionFalse, ReasonAgentTimeout, "Agent exceeded its configured execution budget")
+			} else if step == "verification" {
 				// OLS-3817: an objective verification failure (the agent ran and
 				// its VerificationResult reports the remediation did not work)
 				// escalates directly instead of retrying execution or terminating.
@@ -384,6 +396,11 @@ func validateResultCR(ctx context.Context, c client.Client, run *agenticv1alpha1
 	cond := meta.FindStatusCondition(conditions, agenticv1alpha1.ResultConditionCompleted)
 	if cond == nil || cond.Status != metav1.ConditionTrue {
 		return nil, "result CR missing Completed condition"
+	}
+	// Cooperative timeout is a distinct agent outcome. Check the Completed
+	// condition before failureReason because the sandbox includes both fields.
+	if cond.Reason == agenticv1alpha1.ResultReasonAgentTimeout {
+		return obj, agenticv1alpha1.ResultReasonAgentTimeout
 	}
 	if failureReason != "" {
 		return obj, failureReason

@@ -265,6 +265,16 @@ func TestStepTimeout_Values(t *testing.T) {
 	}
 }
 
+func TestSandboxPodDeadline_UsesConfiguredTimeout(t *testing.T) {
+	agent := &agenticv1alpha1.Agent{Spec: agenticv1alpha1.AgentSpec{
+		Timeouts: agenticv1alpha1.AgentTimeouts{AnalysisSeconds: 30},
+	}}
+	want := sandboxStartupTimeout + 30*time.Second + sandboxRunningGrace
+	if got := sandboxPodDeadline(agent, "analysis"); got != want {
+		t.Fatalf("sandboxPodDeadline = %v, want %v", got, want)
+	}
+}
+
 type trackingMockSandbox struct {
 	released   *[]string
 	errOnClaim string

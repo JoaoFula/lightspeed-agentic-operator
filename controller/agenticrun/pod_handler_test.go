@@ -113,7 +113,7 @@ func TestCompleteStep_VerificationObjectiveFailure_Escalates(t *testing.T) {
 		"Pod still crashing")
 
 	pod := &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodSucceeded}}
-	if err := r.completeStep(ctx, run, pod, "verification", stepConditionType("verification"), ""); err != nil {
+	if err := r.completeStep(ctx, run, pod, "verification", stepConditionType("verification"), "", ""); err != nil {
 		t.Fatalf("completeStep: %v", err)
 	}
 
@@ -147,6 +147,45 @@ func TestCompleteStep_VerificationObjectiveFailure_Escalates(t *testing.T) {
 // TestCompleteStep_VerificationSuccess_Completed exercises the REAL pod-handler
 // path for a passing verification (completeStep → patchStepResult): Verified=True
 // and no Escalated condition, so DerivePhase yields Completed.
+func TestCompleteStep_VerificationAgentTimeout_Escalates(t *testing.T) {
+	ctx := context.Background()
+	r, run := newVerifyingReconciler(t)
+
+	name := resultCRName(run.Name, "verification", nextResultIndex(run, "verification"))
+	createVerificationResult(t, r, run, agenticv1alpha1.ActionOutcomeFailed, nil, "Agent invocation timed out")
+	result := &agenticv1alpha1.VerificationResult{}
+	if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: "default"}, result); err != nil {
+		t.Fatalf("get VerificationResult: %v", err)
+	}
+	completed := meta.FindStatusCondition(result.Status.Conditions, agenticv1alpha1.ResultConditionCompleted)
+	completed.Reason = agenticv1alpha1.ResultReasonAgentTimeout
+	completed.Message = "Agent invocation timeout"
+	if err := r.Status().Update(ctx, result); err != nil {
+		t.Fatalf("update VerificationResult timeout status: %v", err)
+	}
+
+	pod := &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodSucceeded}}
+	if err := r.completeStep(ctx, run, pod, "verification", stepConditionType("verification"), "", ""); err != nil {
+		t.Fatalf("completeStep: %v", err)
+	}
+
+	got, err := getAgenticRun(r, "fix-crash")
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if phase := agenticv1alpha1.DerivePhase(got.Status.Conditions); phase != agenticv1alpha1.AgenticRunPhaseEscalating {
+		t.Fatalf("expected Escalating, got %s", phase)
+	}
+	verified := meta.FindStatusCondition(got.Status.Conditions, agenticv1alpha1.AgenticRunConditionVerified)
+	if verified == nil || verified.Status != metav1.ConditionFalse {
+		t.Fatalf("expected Verified=False, got %+v", verified)
+	}
+	escalated := meta.FindStatusCondition(got.Status.Conditions, agenticv1alpha1.AgenticRunConditionEscalated)
+	if escalated == nil || escalated.Status != metav1.ConditionUnknown {
+		t.Fatalf("expected Escalated=Unknown, got %+v", escalated)
+	}
+}
+
 func TestCompleteStep_VerificationSuccess_Completed(t *testing.T) {
 	ctx := context.Background()
 	r, run := newVerifyingReconciler(t)
@@ -156,7 +195,7 @@ func TestCompleteStep_VerificationSuccess_Completed(t *testing.T) {
 		"Pod healthy")
 
 	pod := &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodSucceeded}}
-	if err := r.completeStep(ctx, run, pod, "verification", stepConditionType("verification"), ""); err != nil {
+	if err := r.completeStep(ctx, run, pod, "verification", stepConditionType("verification"), "", ""); err != nil {
 		t.Fatalf("completeStep: %v", err)
 	}
 
@@ -188,7 +227,7 @@ func TestCompleteStep_VerificationSystemFailure_Terminal(t *testing.T) {
 
 	// No VerificationResult CR is created — validateResultCR returns msgSandboxNoResult.
 	pod := &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodSucceeded}}
-	if err := r.completeStep(ctx, run, pod, "verification", stepConditionType("verification"), ""); err != nil {
+	if err := r.completeStep(ctx, run, pod, "verification", stepConditionType("verification"), "", ""); err != nil {
 		t.Fatalf("completeStep: %v", err)
 	}
 
@@ -356,7 +395,7 @@ func TestCompleteStep_AggregatesTokenUsage(t *testing.T) {
 			setupVerificationResultCR(t, r, run, tt.outcome, tt.checks, tt.summary, tt.tu)
 
 			pod := &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodSucceeded}}
-			if err := r.completeStep(ctx, run, pod, "verification", stepConditionType("verification"), ""); err != nil {
+			if err := r.completeStep(ctx, run, pod, "verification", stepConditionType("verification"), "", ""); err != nil {
 				t.Fatalf("completeStep: %v", err)
 			}
 
@@ -452,6 +491,20 @@ func TestStartTimedOut(t *testing.T) {
 				t.Errorf("startTimedOut = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestMainContainerStartedAt(t *testing.T) {
+	started := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	pod := &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+		{Name: "sidecar", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(started.Add(-time.Minute))}}},
+		{Name: "agent", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(started)}}},
+	}}}
+	if got := mainContainerStartedAt(pod); !got.Equal(started) {
+		t.Fatalf("mainContainerStartedAt = %v, want %v", got, started)
+	}
+	if got := mainContainerStartedAt(&corev1.Pod{}); !got.IsZero() {
+		t.Fatalf("mainContainerStartedAt without running container = %v, want zero", got)
 	}
 }
 
