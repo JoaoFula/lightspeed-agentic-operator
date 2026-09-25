@@ -175,8 +175,12 @@ func (r *AgenticRunReconciler) completeStep(ctx context.Context, run *agenticv1a
 		}
 	} else {
 		failMsg := podFailMessage(pod)
+		failReason := ReasonSandboxFailed
+		if terminationMessage, _ := podTerminatedInfo(pod); terminationMessage == ReasonToolResultSafetyInspectionFailed {
+			failReason = ReasonToolResultSafetyInspectionFailed
+		}
 		log.Info("sandbox step failed", "message", failMsg)
-		patchErr = r.patchStepCondition(ctx, run, condType, metav1.ConditionFalse, ReasonSandboxFailed, failMsg)
+		patchErr = r.patchStepCondition(ctx, run, condType, metav1.ConditionFalse, failReason, failMsg)
 	}
 
 	if patchErr != nil {
@@ -483,6 +487,9 @@ func podFailMessage(pod *corev1.Pod) string {
 	}
 	msg, exitCode := podTerminatedInfo(pod)
 	if msg != "" {
+		if msg == ReasonToolResultSafetyInspectionFailed {
+			return msgToolResultSafetyInspectionFailed
+		}
 		return msg
 	}
 	if exitCode != nil {
