@@ -374,36 +374,22 @@ type AgenticRunSpec struct {
 	// the operator detects (generation > observedGeneration) and triggers
 	// re-analysis with the feedback appended to the original request.
 	//
-	// Mutable: this and ttlAfterTerminal below are the only mutable spec
-	// fields. All other spec fields are immutable via CEL rules, so a
-	// generation change coming from one of those would signal revision;
-	// see ttlAfterTerminal for how the controller avoids that trap for its
-	// own writes.
+	// Mutable: this and terminalTTL below are the only mutable spec
+	// fields. All other spec fields are immutable via CEL rules.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=32768
 	RevisionFeedback string `json:"revisionFeedback,omitempty"`
 
-	// ttlAfterTerminal is the time-to-live in seconds for this AgenticRun
-	// after it reaches a terminal state (Completed, Failed, Denied,
-	// Escalated, EmergencyStopped). When the TTL expires,
-	// the operator deletes the AgenticRun CR and Kubernetes garbage
-	// collection cascades deletion to owned resources.
-	//
-	// Overrides the cluster-wide default from
-	// AgenticOLSConfig.spec.lifecycle.terminalTTL for this run.
-	//
-	// Set to 0 to disable automatic deletion for this run.
-	//
-	// Mutable: adapters or admins may pre-set this before the run reaches
-	// terminal state. The operator will not overwrite a pre-set value.
-	// When the operator stamps this itself, it also advances
-	// Analyzed.observedGeneration to match in the same operation, so its
-	// own write is never mistaken by needsRevision() for a pending
-	// revisionFeedback request.
+	// terminalTTL requests cleanup after this many whole days in a terminal
+	// phase (Completed, Failed, Denied, Escalated, EmergencyStopped).
+	// The operator caps this request at the cluster retention ceiling and
+	// records the actual deadline in status.deleteAfter. Omission uses the
+	// cluster ceiling. This field may be changed before the run first
+	// becomes terminal, but not after terminalTime has been recorded.
 	// +optional
-	// +kubebuilder:validation:Minimum=0
-	TTLAfterTerminal *int32 `json:"ttlAfterTerminal,omitempty"`
+	// +kubebuilder:validation:Minimum=1
+	TerminalTTL *int32 `json:"terminalTTL,omitempty"` //nolint:kubeapilinter // pointer distinguishes omitted TTL from an explicit invalid zero
 }
 
 // AgenticRunStatus defines the observed state of AgenticRun. All fields are
@@ -444,15 +430,23 @@ type AgenticRunStatus struct {
 	// updated again while the run remains terminal; cleared when a
 	// revision request moves the run out of a terminal phase back into
 	// analysis, so a later terminal phase gets a fresh timestamp.
-	// Used together with spec.ttlAfterTerminal to compute when the run
-	// should be garbage-collected.
+	// Used with status.deleteAfter to report when the run is eligible
+	// for deletion.
 	// +optional
 	TerminalTime *metav1.Time `json:"terminalTime,omitempty"`
+
+	// deleteAfter is the fixed deadline for automatic deletion of this run.
+	// It is absent for preserved failed runs. The controller sets it once
+	// for each terminal transition and does not change it when the cluster
+	// retention ceiling changes.
+	// +optional
+	DeleteAfter *metav1.Time `json:"deleteAfter,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.terminalTime) || (has(self.spec.terminalTTL) == has(oldSelf.spec.terminalTTL) && (!has(self.spec.terminalTTL) || self.spec.terminalTTL == oldSelf.spec.terminalTTL))",message="terminalTTL cannot change after terminalTime is recorded"
 // +kubebuilder:printcolumn:name="Request",type=string,JSONPath=`.spec.request`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 

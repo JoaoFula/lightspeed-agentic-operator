@@ -3,10 +3,12 @@ package configuration
 const (
 	// ConfigMapName is the well-known name of the ConfigMap created by the
 	// lightspeed-operator with agentic sandbox and Collector connectivity details.
-	ConfigMapName = "lightspeed-agentic-configuration"
+	ConfigMapName                = "lightspeed-agentic-configuration"
+	DefaultTerminalTTLDays int32 = 14
 
 	// ConfigMap keys (lightspeed-agentic-configuration)
 	KeySandboxMode                 = "sandbox-mode"
+	KeyTerminalTTLDays             = "terminal-ttl-days"
 	KeySandboxPodSpec              = "sandbox-pod-spec"
 	KeyToolOutputInspectionEnabled = "tool-output-inspection-enabled"
 	KeyTLSProfile                  = "tls-profile"

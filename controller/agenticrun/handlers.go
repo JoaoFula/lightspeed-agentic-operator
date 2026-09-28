@@ -8,6 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agenticv1alpha1 "github.com/openshift/lightspeed-agentic-operator/api/v1alpha1"
@@ -16,6 +17,7 @@ import (
 const (
 	ErrUpdateToAnalyzing         = "update to Analyzing"
 	ErrUpdateToAnalyzingRevision = "update to Analyzing (revision)"
+	ErrClearTerminalLabel        = "clear terminal TTL label"
 	ErrUpdateToCompletedAdvisory = "update to Completed (advisory)"
 	ErrUpdateAfterExecSkip       = "update after execution skip"
 	ErrUpdateToExecuting         = "update to Executing"
@@ -99,16 +101,22 @@ func (r *AgenticRunReconciler) handleRevision(
 		return ctrl.Result{}, nil
 	}
 
+	if run.Labels[terminalTTLLabel] != "" {
+		base := run.DeepCopy()
+		delete(run.Labels, terminalTTLLabel)
+		if err := r.Patch(ctx, run, client.MergeFrom(base)); err != nil {
+			return ctrl.Result{}, fmt.Errorf("%s: %w", ErrClearTerminalLabel, err)
+		}
+	}
+
 	base := run.DeepCopy()
 	meta.RemoveStatusCondition(&run.Status.Conditions, agenticv1alpha1.AgenticRunConditionExecuted)
 	meta.RemoveStatusCondition(&run.Status.Conditions, agenticv1alpha1.AgenticRunConditionVerified)
 	meta.RemoveStatusCondition(&run.Status.Conditions, agenticv1alpha1.AgenticRunConditionEscalated)
 	resetExecutionAndVerification(&run.Status.Steps)
-	// The run is leaving its terminal phase to re-analyze; clear terminalTime
-	// so that if it reaches a terminal phase again, handleTerminalTTL stamps
-	// a fresh timestamp instead of computing expiry off the prior terminal
-	// event (see run-lifecycle.md rule 23/24).
+	// A later terminal transition receives a fresh deletion deadline.
 	run.Status.TerminalTime = nil
+	run.Status.DeleteAfter = nil
 	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
 		Type:               agenticv1alpha1.AgenticRunConditionAnalyzed,
 		Status:             metav1.ConditionUnknown,

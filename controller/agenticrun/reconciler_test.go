@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	agenticv1alpha1 "github.com/openshift/lightspeed-agentic-operator/api/v1alpha1"
+	"github.com/openshift/lightspeed-agentic-operator/pkg/configuration"
 )
 
 func TestPreserveFailedSandbox(t *testing.T) {
@@ -43,7 +44,7 @@ func TestPreserveFailedSandbox(t *testing.T) {
 	}
 }
 
-func TestHandleTerminalCleanupPreservesFailedSandbox(t *testing.T) {
+func TestReconcilePreservesFailedSandbox(t *testing.T) {
 	tests := []struct {
 		name        string
 		annotations map[string]string
@@ -63,12 +64,11 @@ func TestHandleTerminalCleanupPreservesFailedSandbox(t *testing.T) {
 				Reason: reasonFailed,
 			}}
 			caller := newTestAgentCaller()
-			fc := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(run).
-				WithStatusSubresource(run).Build()
-			r := &AgenticRunReconciler{Client: fc, Agent: caller, Namespace: "default"}
+			r := ttlTestReconciler(t, run, ttlTestCache(t, "14"))
+			r.Agent = caller
 
-			if _, err := r.handleTerminalCleanup(context.Background(), run, agenticv1alpha1.AgenticRunPhaseFailed); err != nil {
-				t.Fatalf("handleTerminalCleanup: %v", err)
+			if _, err := reconcileOnce(r, run.Name); err != nil {
+				t.Fatalf("reconcile: %v", err)
 			}
 			if caller.releaseAllCount != tt.wantRelease {
 				t.Fatalf("ReleaseSandboxes called %d times, want %d", caller.releaseAllCount, tt.wantRelease)
@@ -487,6 +487,14 @@ func testReaderClusterRoleBinding() *rbacv1.ClusterRoleBinding {
 }
 
 func reconcileOnce(r *AgenticRunReconciler, name string) (ctrl.Result, error) {
+	// Most tests exercise workflow behavior with an available ConfigMap.
+	// Missing-config tests call Reconcile directly instead.
+	if r.Config == nil {
+		r.Config = &configuration.Cache{}
+		if err := r.Config.OnConfigMapChange(context.Background(), &corev1.ConfigMap{}); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	return r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: name, Namespace: "default"},
 	})

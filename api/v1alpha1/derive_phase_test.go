@@ -1,7 +1,10 @@
 package v1alpha1
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -233,5 +236,52 @@ func TestDerivePhase(t *testing.T) {
 				t.Errorf("DerivePhase() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// A client must be able to request days and read the fixed deadline without
+// depending on the removed seconds-based TTL or cluster lifecycle config.
+func TestTerminalTTLJSONContract(t *testing.T) {
+	days := int32(3)
+	deadline := metav1.NewTime(time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC))
+	run := AgenticRun{
+		Spec:   AgenticRunSpec{TerminalTTL: &days},
+		Status: AgenticRunStatus{DeleteAfter: &deadline},
+	}
+	data, err := json.Marshal(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"terminalTTL":3`, `"deleteAfter":"2026-09-28T12:00:00Z"`} {
+		if !strings.Contains(string(data), field) {
+			t.Errorf("run JSON %s missing %s", data, field)
+		}
+	}
+	var decoded AgenticRun
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Spec.TerminalTTL == nil || *decoded.Spec.TerminalTTL != 3 || decoded.Status.DeleteAfter == nil || !decoded.Status.DeleteAfter.Equal(&deadline) {
+		t.Errorf("round trip lost TTL request or deadline: %#v", decoded)
+	}
+	copy := decoded.DeepCopy()
+	*copy.Spec.TerminalTTL = 5
+	copy.Status.DeleteAfter.Time = copy.Status.DeleteAfter.Add(24 * time.Hour)
+	if *decoded.Spec.TerminalTTL != 3 || !decoded.Status.DeleteAfter.Equal(&deadline) {
+		t.Error("deep copy shares TTL request or deadline with original")
+	}
+}
+
+func TestLegacyLifecycleFieldIsNotExposed(t *testing.T) {
+	var config AgenticOLSConfig
+	if err := json.Unmarshal([]byte(`{"spec":{"suspended":false,"lifecycle":{"terminalTTL":60}}}`), &config); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"lifecycle"`) || strings.Contains(string(data), `"terminalTTL"`) {
+		t.Errorf("removed lifecycle field is still exposed: %s", data)
 	}
 }

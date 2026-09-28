@@ -57,6 +57,7 @@ type Config struct {
 	MCP                         MCPConfig
 	RHOKP                       RHOKPConfig
 	ToolOutputInspectionEnabled bool
+	TerminalTTLDays             int32
 }
 
 // Cache is a thread-safe holder for the parsed ConfigMap contents.
@@ -138,8 +139,23 @@ func parseToolOutputInspectionEnabled(data map[string]string) bool {
 	return enabled
 }
 
+func parseTerminalTTLDays(data map[string]string) int32 {
+	raw, ok := data[KeyTerminalTTLDays]
+	if !ok {
+		logf.Log.Info("terminal TTL not configured, using default", "days", DefaultTerminalTTLDays)
+		return DefaultTerminalTTLDays
+	}
+	days, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 32)
+	if err != nil || days <= 0 {
+		logf.Log.Info("invalid terminal TTL, using default", "value", raw, "days", DefaultTerminalTTLDays)
+		return DefaultTerminalTTLDays
+	}
+	return int32(days)
+}
+
 func parseConfigMap(cm *corev1.ConfigMap) (*Config, error) {
 	cfg := &Config{
+		TerminalTTLDays: parseTerminalTTLDays(cm.Data),
 		Sandbox: SandboxConfig{
 			Mode: cm.Data[KeySandboxMode],
 		},
