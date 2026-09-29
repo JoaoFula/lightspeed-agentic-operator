@@ -5,487 +5,259 @@ import (
 	"testing"
 	"time"
 
-	"k8s.io/apimachinery/pkg/api/meta"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agenticv1alpha1 "github.com/openshift/lightspeed-agentic-operator/api/v1alpha1"
+	"github.com/openshift/lightspeed-agentic-operator/pkg/configuration"
 )
 
-// ptr32 is defined in helpers_test.go
-
-func TestGetTerminalTTL(t *testing.T) {
-	tests := []struct {
-		name    string
-		objects []client.Object
-		want    *int32
-	}{
-		{
-			name:    "no config CR returns nil",
-			objects: nil,
-			want:    nil,
-		},
-		{
-			name: "config without lifecycle returns nil",
-			objects: []client.Object{&agenticv1alpha1.AgenticOLSConfig{
-				ObjectMeta: metav1.ObjectMeta{Name: "cluster"},
-				Spec:       agenticv1alpha1.AgenticOLSConfigSpec{},
-			}},
-			want: nil,
-		},
-		{
-			name: "config with terminalTTL returns value",
-			objects: []client.Object{&agenticv1alpha1.AgenticOLSConfig{
-				ObjectMeta: metav1.ObjectMeta{Name: "cluster"},
-				Spec: agenticv1alpha1.AgenticOLSConfigSpec{
-					Lifecycle: agenticv1alpha1.LifecycleConfig{TerminalTTL: ptr32(3600)},
-				},
-			}},
-			want: ptr32(3600),
-		},
+func ttlTestCache(t *testing.T, days string) *configuration.Cache {
+	t.Helper()
+	cache := &configuration.Cache{}
+	if err := cache.OnConfigMapChange(context.Background(), &corev1.ConfigMap{
+		Data: map[string]string{configuration.KeyTerminalTTLDays: days},
+	}); err != nil {
+		t.Fatal(err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			objects := tt.objects
-			if objects == nil {
-				objects = []client.Object{}
-			}
-			fc := fake.NewClientBuilder().
-				WithScheme(testScheme()).
-				WithObjects(objects...).
-				Build()
-			got, err := getTerminalTTL(context.Background(), fc)
+	return cache
+}
+
+func terminalTestRun() *agenticv1alpha1.AgenticRun {
+	run := testAgenticRun()
+	run.Status.Conditions = []metav1.Condition{{
+		Type: agenticv1alpha1.AgenticRunConditionVerified, Status: metav1.ConditionTrue, Reason: "Complete",
+	}}
+	return run
+}
+
+func ttlTestReconciler(t *testing.T, run *agenticv1alpha1.AgenticRun, cache *configuration.Cache) *AgenticRunReconciler {
+	t.Helper()
+	objects := append([]client.Object{run}, defaultObjects()...)
+	fc := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(objects...).WithStatusSubresource(run).Build()
+	return &AgenticRunReconciler{Client: fc, Config: cache, Agent: newTestAgentCaller(), Namespace: "default"}
+}
+
+func TestHandleTerminalTTL_RecordsCappedDeadlineWithoutChangingSpec(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		request  *int32
+		ceiling  string
+		wantDays int
+	}{
+		{name: "omitted request", ceiling: "4", wantDays: 4},
+		{name: "shorter request", request: ptr32(2), ceiling: "4", wantDays: 2},
+		{name: "equal request", request: ptr32(4), ceiling: "4", wantDays: 4},
+		{name: "longer request", request: ptr32(6), ceiling: "4", wantDays: 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := terminalTestRun()
+			run.Spec.TerminalTTL = tc.request
+			run.Generation = 5
+			r := ttlTestReconciler(t, run, ttlTestCache(t, tc.ceiling))
+			result, err := reconcileOnce(r, run.Name)
 			if err != nil {
-				t.Fatalf("getTerminalTTL() error = %v", err)
+				t.Fatal(err)
 			}
-			if (got == nil) != (tt.want == nil) {
-				t.Fatalf("getTerminalTTL() = %v, want %v", got, tt.want)
+			got, err := getAgenticRun(r, run.Name)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if got != nil && *got != *tt.want {
-				t.Fatalf("getTerminalTTL() = %d, want %d", *got, *tt.want)
+			if got.Status.TerminalTime == nil || got.Status.DeleteAfter == nil {
+				t.Fatalf("both terminal timestamps must be recorded: %#v", got.Status)
+			}
+			if want := time.Duration(tc.wantDays) * 24 * time.Hour; got.Status.DeleteAfter.Sub(got.Status.TerminalTime.Time) != want {
+				t.Errorf("deadline interval = %v, want %v", got.Status.DeleteAfter.Sub(got.Status.TerminalTime.Time), want)
+			}
+			if got.Generation != 5 || (got.Spec.TerminalTTL == nil) != (tc.request == nil) || (tc.request != nil && *got.Spec.TerminalTTL != *tc.request) {
+				t.Errorf("TTL processing changed spec/generation: spec=%+v generation=%d", got.Spec, got.Generation)
+			}
+			if got.Labels[terminalTTLLabel] != "true" {
+				t.Errorf("terminal TTL label = %q, want true", got.Labels[terminalTTLLabel])
+			}
+			if result.RequeueAfter != 0 {
+				t.Errorf("terminal run must not schedule its own expiry check: %+v", result)
 			}
 		})
 	}
 }
 
-func TestHandleTerminalTTL_StampsTerminalTimeAndTTL(t *testing.T) {
-	config := &agenticv1alpha1.AgenticOLSConfig{
-		ObjectMeta: metav1.ObjectMeta{Name: "cluster"},
-		Spec: agenticv1alpha1.AgenticOLSConfigSpec{
-			Lifecycle: agenticv1alpha1.LifecycleConfig{TerminalTTL: ptr32(3600)},
-		},
-	}
+func TestReconcile_LabeledTerminalRunSkipsCleanup(t *testing.T) {
+	run := terminalTestRun()
+	run.Labels = map[string]string{terminalTTLLabel: "true"}
+	run.Status.TerminalTime = ptrTime(time.Now())
+	run.Status.DeleteAfter = ptrTime(time.Now().Add(24 * time.Hour))
+	run.Status.Steps.Analysis.Sandbox.ClaimName = "analysis-sandbox"
+	caller := newTestAgentCaller()
+	r := ttlTestReconciler(t, run, nil)
+	r.Agent = caller
 
-	run := testAgenticRun()
-	run.Status.Conditions = []metav1.Condition{{
-		Type:   agenticv1alpha1.AgenticRunConditionVerified,
-		Status: metav1.ConditionTrue,
-		Reason: "Complete",
-	}}
-
-	objs := append([]client.Object{run, config}, defaultObjects()...)
-	fc := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(objs...).
-		WithStatusSubresource(run).Build()
-
-	r := &AgenticRunReconciler{Client: fc, Agent: newTestAgentCaller(), Namespace: "default"}
-
-	result, err := reconcileOnce(r, "fix-crash")
-	if err != nil {
-		t.Fatalf("reconcile: %v", err)
+	if _, err := reconcileOnce(r, run.Name); err != nil {
+		t.Fatal(err)
 	}
-
-	got, getErr := getAgenticRun(r, "fix-crash")
-	if getErr != nil {
-		t.Fatalf("getAgenticRun: %v", getErr)
-	}
-
-	if got.Status.TerminalTime == nil {
-		t.Fatal("terminalTime should be stamped")
-	}
-	if got.Spec.TTLAfterTerminal == nil {
-		t.Fatal("ttlAfterTerminal should be stamped from config")
-	}
-	if *got.Spec.TTLAfterTerminal != 3600 {
-		t.Errorf("ttlAfterTerminal = %d, want 3600", *got.Spec.TTLAfterTerminal)
-	}
-	if result.RequeueAfter <= 0 {
-		t.Error("expected RequeueAfter > 0 for non-expired TTL")
-	}
-
-	stampedTerminalTime := got.Status.TerminalTime.DeepCopy()
-
-	// A second reconcile of the same still-terminal run must not refresh
-	// terminalTime -- otherwise expiry would perpetually postpone itself.
-	if _, err := reconcileOnce(r, "fix-crash"); err != nil {
-		t.Fatalf("second reconcile: %v", err)
-	}
-	after, getErr := getAgenticRun(r, "fix-crash")
-	if getErr != nil {
-		t.Fatalf("getAgenticRun after second reconcile: %v", getErr)
-	}
-	if after.Status.TerminalTime == nil {
-		t.Fatal("terminalTime should still be set after second reconcile")
-	}
-	if !after.Status.TerminalTime.Equal(stampedTerminalTime) {
-		t.Errorf("terminalTime changed on second reconcile: got %v, want unchanged %v", after.Status.TerminalTime, stampedTerminalTime)
+	if caller.releaseAllCount != 0 {
+		t.Errorf("terminal cleanup was repeated %d times", caller.releaseAllCount)
 	}
 }
 
-func TestHandleTerminalTTL_PresetTTLNotOverwritten(t *testing.T) {
-	config := &agenticv1alpha1.AgenticOLSConfig{
-		ObjectMeta: metav1.ObjectMeta{Name: "cluster"},
-		Spec: agenticv1alpha1.AgenticOLSConfigSpec{
-			Lifecycle: agenticv1alpha1.LifecycleConfig{TerminalTTL: ptr32(3600)},
-		},
+func TestReconcile_PreLabeledRunReceivesTerminalDeadline(t *testing.T) {
+	run := terminalTestRun()
+	run.Labels = map[string]string{terminalTTLLabel: "true"}
+	r := ttlTestReconciler(t, run, ttlTestCache(t, "14"))
+
+	if _, err := reconcileOnce(r, run.Name); err != nil {
+		t.Fatal(err)
 	}
-
-	run := testAgenticRun()
-	run.Spec.TTLAfterTerminal = ptr32(7200) // pre-set by adapter
-	run.Status.Conditions = []metav1.Condition{{
-		Type:   agenticv1alpha1.AgenticRunConditionVerified,
-		Status: metav1.ConditionTrue,
-		Reason: "Complete",
-	}}
-
-	objs := append([]client.Object{run, config}, defaultObjects()...)
-	fc := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(objs...).
-		WithStatusSubresource(run).Build()
-
-	r := &AgenticRunReconciler{Client: fc, Agent: newTestAgentCaller(), Namespace: "default"}
-
-	_, err := reconcileOnce(r, "fix-crash")
+	got, err := getAgenticRun(r, run.Name)
 	if err != nil {
-		t.Fatalf("reconcile: %v", err)
+		t.Fatal(err)
 	}
+	if got.Status.TerminalTime == nil || got.Status.DeleteAfter == nil {
+		t.Errorf("pre-labeled run should receive a terminal deadline: status=%+v", got.Status)
+	}
+}
 
-	got, getErr := getAgenticRun(r, "fix-crash")
-	if getErr != nil {
-		t.Fatalf("getAgenticRun: %v", getErr)
+func TestHandleTerminalTTL_UsesRecordedDeadlineAfterConfigChanges(t *testing.T) {
+	run := terminalTestRun()
+	cache := ttlTestCache(t, "3")
+	r := ttlTestReconciler(t, run, cache)
+	if _, err := reconcileOnce(r, run.Name); err != nil {
+		t.Fatal(err)
 	}
-	if got.Spec.TTLAfterTerminal == nil || *got.Spec.TTLAfterTerminal != 7200 {
-		t.Errorf("ttlAfterTerminal = %v, want 7200 (pre-set should not be overwritten)", got.Spec.TTLAfterTerminal)
+	first, err := getAgenticRun(r, run.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline, terminalTime := *first.Status.DeleteAfter, *first.Status.TerminalTime
+	if err := cache.OnConfigMapChange(context.Background(), &corev1.ConfigMap{Data: map[string]string{configuration.KeyTerminalTTLDays: "1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconcileOnce(r, run.Name); err != nil {
+		t.Fatal(err)
+	}
+	after, err := getAgenticRun(r, run.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.Status.DeleteAfter.Equal(&deadline) || !after.Status.TerminalTime.Equal(&terminalTime) {
+		t.Error("later configuration change moved recorded deadline")
+	}
+}
+
+func TestSweepExpiredRuns_OnlyDeletesLabeledExpiredRuns(t *testing.T) {
+	expired := terminalTestRun()
+	expired.Status.DeleteAfter = ptrTime(time.Now().Add(-time.Hour))
+	expired.Labels = map[string]string{terminalTTLLabel: "true"}
+
+	future := terminalTestRun()
+	future.Name = "future"
+	future.Status.DeleteAfter = ptrTime(time.Now().Add(time.Hour))
+	future.Labels = map[string]string{terminalTTLLabel: "true"}
+
+	unlabeled := terminalTestRun()
+	unlabeled.Name = "unlabeled"
+	unlabeled.Status.DeleteAfter = ptrTime(time.Now().Add(-time.Hour))
+
+	r := ttlTestReconciler(t, expired, nil)
+	if err := r.Create(context.Background(), future); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Create(context.Background(), unlabeled); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.sweepExpiredRuns(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name       string
+		wantDelete bool
+	}{
+		{expired.Name, true}, {future.Name, false}, {unlabeled.Name, false},
+	} {
+		var got agenticv1alpha1.AgenticRun
+		err := r.Get(context.Background(), types.NamespacedName{Name: tc.name, Namespace: expired.Namespace}, &got)
+		if tc.wantDelete {
+			if err == nil && got.DeletionTimestamp.IsZero() {
+				t.Errorf("%s should be deleted", tc.name)
+			}
+		} else if err != nil || !got.DeletionTimestamp.IsZero() {
+			t.Errorf("%s should remain, err=%v", tc.name, err)
+		}
+	}
+}
+
+func ptrTime(t time.Time) *metav1.Time {
+	v := metav1.NewTime(t)
+	return &v
+}
+
+func TestReconcile_MissingConfigReturnsRetryableError(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cache *configuration.Cache
+		run   func() *agenticv1alpha1.AgenticRun
+	}{
+		{name: "pending run with nil cache", run: testAgenticRun},
+		{name: "terminal run with unloaded cache", cache: &configuration.Cache{}, run: terminalTestRun},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := tc.run()
+			r := ttlTestReconciler(t, run, tc.cache)
+			result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+			if err == nil || err.Error() != "operator configuration not yet available" {
+				t.Fatalf("expected configuration-not-ready error, got %v", err)
+			}
+			got, err := getAgenticRun(r, run.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status.TerminalTime != nil || got.Status.DeleteAfter != nil || got.Labels[terminalTTLLabel] != "" {
+				t.Error("deadline and label should wait for configuration")
+			}
+			if result.RequeueAfter != 0 {
+				t.Errorf("missing configuration must not schedule a fixed timer: %+v", result)
+			}
+		})
+	}
+}
+
+func TestReconcile_PreserveAnnotationDoesNotDisableCompletedTTL(t *testing.T) {
+	run := terminalTestRun()
+	run.Annotations = map[string]string{preserveSandboxAnnotation: "true"}
+	r := ttlTestReconciler(t, run, ttlTestCache(t, "14"))
+
+	if _, err := reconcileOnce(r, run.Name); err != nil {
+		t.Fatal(err)
+	}
+	got, err := getAgenticRun(r, run.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.TerminalTime == nil || got.Status.DeleteAfter == nil || got.Labels[terminalTTLLabel] != "true" {
+		t.Errorf("completed run should receive a deadline despite preservation annotation: status=%+v labels=%v", got.Status, got.Labels)
 	}
 }
 
 func TestHandleTerminalTTL_PreservedFailedSandboxDisablesAutoDeletion(t *testing.T) {
 	run := testAgenticRun()
 	run.Annotations = map[string]string{preserveSandboxAnnotation: "true"}
-	run.Spec.TTLAfterTerminal = ptr32(1)
-	now := metav1.NewTime(time.Now().Add(-1 * time.Hour))
-	run.Status.TerminalTime = &now
 	run.Status.Conditions = []metav1.Condition{{
-		Type:   agenticv1alpha1.AgenticRunConditionAnalyzed,
-		Status: metav1.ConditionFalse,
-		Reason: reasonFailed,
+		Type: agenticv1alpha1.AgenticRunConditionAnalyzed, Status: metav1.ConditionFalse, Reason: reasonFailed,
 	}}
-
-	fc := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(run).
-		WithStatusSubresource(run).Build()
-	r := &AgenticRunReconciler{Client: fc, Agent: newTestAgentCaller(), Namespace: "default"}
-
-	result, requeue, err := r.handleTerminalTTL(context.Background(), run)
+	r := ttlTestReconciler(t, run, nil)
+	result, err := reconcileOnce(r, run.Name)
 	if err != nil {
-		t.Fatalf("handleTerminalTTL: %v", err)
+		t.Fatal(err)
 	}
-	if requeue || result.RequeueAfter != 0 {
-		t.Fatal("preserved failed sandbox must not requeue for TTL deletion")
-	}
-	if _, err := getAgenticRun(r, "fix-crash"); err != nil {
-		t.Fatalf("preserved run should remain: %v", err)
-	}
-}
-
-func TestHandleTerminalTTL_ZeroDisablesAutoDeletion(t *testing.T) {
-	run := testAgenticRun()
-	run.Spec.TTLAfterTerminal = ptr32(0) // explicitly disable
-	now := metav1.NewTime(time.Now().Add(-1 * time.Hour))
-	run.Status.TerminalTime = &now
-	run.Status.Conditions = []metav1.Condition{{
-		Type:   agenticv1alpha1.AgenticRunConditionVerified,
-		Status: metav1.ConditionTrue,
-		Reason: "Complete",
-	}}
-
-	objs := append([]client.Object{run}, defaultObjects()...)
-	fc := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(objs...).
-		WithStatusSubresource(run).Build()
-
-	r := &AgenticRunReconciler{Client: fc, Agent: newTestAgentCaller(), Namespace: "default"}
-
-	result, err := reconcileOnce(r, "fix-crash")
+	got, err := getAgenticRun(r, run.Name)
 	if err != nil {
-		t.Fatalf("reconcile: %v", err)
+		t.Fatal(err)
 	}
-	if result.RequeueAfter != 0 {
-		t.Error("ttl=0 should not requeue")
-	}
-
-	// Run should still exist.
-	got, getErr := getAgenticRun(r, "fix-crash")
-	if getErr != nil {
-		t.Fatalf("run should not be deleted when ttl=0: %v", getErr)
-	}
-	if got == nil {
-		t.Fatal("run should still exist when ttl=0")
-	}
-}
-
-func TestHandleTerminalTTL_ExpiredRunDeleted(t *testing.T) {
-	run := testAgenticRun()
-	run.Spec.TTLAfterTerminal = ptr32(60) // 60 seconds TTL
-	pastTime := metav1.NewTime(time.Now().Add(-2 * time.Minute))
-	run.Status.TerminalTime = &pastTime
-	run.Status.Conditions = []metav1.Condition{{
-		Type:   agenticv1alpha1.AgenticRunConditionVerified,
-		Status: metav1.ConditionTrue,
-		Reason: "Complete",
-	}}
-
-	objs := append([]client.Object{run}, defaultObjects()...)
-	fc := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(objs...).
-		WithStatusSubresource(run).Build()
-
-	r := &AgenticRunReconciler{Client: fc, Agent: newTestAgentCaller(), Namespace: "default"}
-
-	_, err := reconcileOnce(r, "fix-crash")
-	if err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-
-	// Every non-deleting reconcile adds rbacCleanupFinalizer and
-	// templogCleanupFinalizer before reaching the terminal-phase handling
-	// (see the "Finalizers" block near the top of Reconcile), so by the
-	// time handleTerminalTTL calls Delete, the run always has finalizers.
-	// The fake client mirrors real Kubernetes semantics here: it keeps the
-	// object with DeletionTimestamp set rather than removing it outright.
-	// Assert that concrete outcome rather than accepting either, so a real
-	// regression (e.g. Delete not called at all) can't slip through as
-	// "acceptable."
-	var updated agenticv1alpha1.AgenticRun
-	getErr := fc.Get(context.Background(), types.NamespacedName{Name: "fix-crash", Namespace: "default"}, &updated)
-	if getErr != nil {
-		t.Fatalf("expired run should still exist with DeletionTimestamp set (finalizers present): %v", getErr)
-	}
-	if updated.DeletionTimestamp.IsZero() {
-		t.Fatal("expired run should have DeletionTimestamp set")
-	}
-}
-
-func TestHandleTerminalTTL_NotExpiredRequeues(t *testing.T) {
-	run := testAgenticRun()
-	run.Spec.TTLAfterTerminal = ptr32(3600) // 1 hour TTL
-	now := metav1.NewTime(time.Now())
-	run.Status.TerminalTime = &now
-	run.Status.Conditions = []metav1.Condition{{
-		Type:   agenticv1alpha1.AgenticRunConditionVerified,
-		Status: metav1.ConditionTrue,
-		Reason: "Complete",
-	}}
-
-	objs := append([]client.Object{run}, defaultObjects()...)
-	fc := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(objs...).
-		WithStatusSubresource(run).Build()
-
-	r := &AgenticRunReconciler{Client: fc, Agent: newTestAgentCaller(), Namespace: "default"}
-
-	result, err := reconcileOnce(r, "fix-crash")
-	if err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	if result.RequeueAfter <= 0 {
-		t.Error("non-expired TTL should requeue with remaining time")
-	}
-	if result.RequeueAfter > 1*time.Hour {
-		t.Errorf("RequeueAfter = %v, should be <= 1h", result.RequeueAfter)
-	}
-
-	// Run should still exist.
-	_, getErr := getAgenticRun(r, "fix-crash")
-	if getErr != nil {
-		t.Fatalf("non-expired run should still exist: %v", getErr)
-	}
-}
-
-func TestHandleTerminalTTL_NoConfigNoAutoDeletion(t *testing.T) {
-	// No AgenticOLSConfig CR exists — backwards-compatible, no auto-deletion.
-	run := testAgenticRun()
-	run.Status.Conditions = []metav1.Condition{{
-		Type:   agenticv1alpha1.AgenticRunConditionVerified,
-		Status: metav1.ConditionTrue,
-		Reason: "Complete",
-	}}
-
-	objs := append([]client.Object{run}, defaultObjects()...)
-	fc := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(objs...).
-		WithStatusSubresource(run).Build()
-
-	r := &AgenticRunReconciler{Client: fc, Agent: newTestAgentCaller(), Namespace: "default"}
-
-	result, err := reconcileOnce(r, "fix-crash")
-	if err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	if result.RequeueAfter != 0 || result.Requeue {
-		t.Error("no config should not cause requeue for TTL")
-	}
-
-	// Run should still exist and have terminalTime stamped but no ttlAfterTerminal.
-	got, getErr := getAgenticRun(r, "fix-crash")
-	if getErr != nil {
-		t.Fatalf("getAgenticRun: %v", getErr)
-	}
-	if got.Status.TerminalTime == nil {
-		t.Error("terminalTime should still be stamped")
-	}
-	if got.Spec.TTLAfterTerminal != nil {
-		t.Errorf("ttlAfterTerminal should be nil when no config, got %d", *got.Spec.TTLAfterTerminal)
-	}
-}
-
-func TestHandleTerminalTTL_DeniedPhase(t *testing.T) {
-	config := &agenticv1alpha1.AgenticOLSConfig{
-		ObjectMeta: metav1.ObjectMeta{Name: "cluster"},
-		Spec: agenticv1alpha1.AgenticOLSConfigSpec{
-			Lifecycle: agenticv1alpha1.LifecycleConfig{TerminalTTL: ptr32(60)},
-		},
-	}
-
-	run := testAgenticRun()
-	run.Status.Conditions = []metav1.Condition{
-		{Type: agenticv1alpha1.AgenticRunConditionAnalyzed, Status: metav1.ConditionTrue, Reason: "AnalysisComplete"},
-		{Type: agenticv1alpha1.AgenticRunConditionDenied, Status: metav1.ConditionTrue, Reason: "UserDenied"},
-	}
-
-	objs := append([]client.Object{run, config}, defaultObjects()...)
-	fc := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(objs...).
-		WithStatusSubresource(run).Build()
-
-	r := &AgenticRunReconciler{Client: fc, Agent: newTestAgentCaller(), Namespace: "default"}
-
-	result, err := reconcileOnce(r, "fix-crash")
-	if err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-
-	got, getErr := getAgenticRun(r, "fix-crash")
-	if getErr != nil {
-		t.Fatalf("getAgenticRun: %v", getErr)
-	}
-	if got.Status.TerminalTime == nil {
-		t.Fatal("Denied run should have terminalTime stamped")
-	}
-	if got.Spec.TTLAfterTerminal == nil || *got.Spec.TTLAfterTerminal != 60 {
-		t.Errorf("ttlAfterTerminal should be 60 for Denied run, got %v", got.Spec.TTLAfterTerminal)
-	}
-	if result.RequeueAfter <= 0 {
-		t.Error("expected RequeueAfter > 0 for non-expired Denied run")
-	}
-}
-
-func TestHandleTerminalTTL_FailedPhase(t *testing.T) {
-	config := &agenticv1alpha1.AgenticOLSConfig{
-		ObjectMeta: metav1.ObjectMeta{Name: "cluster"},
-		Spec: agenticv1alpha1.AgenticOLSConfigSpec{
-			Lifecycle: agenticv1alpha1.LifecycleConfig{TerminalTTL: ptr32(120)},
-		},
-	}
-
-	run := testAgenticRun()
-	run.Status.Conditions = []metav1.Condition{
-		{Type: agenticv1alpha1.AgenticRunConditionAnalyzed, Status: metav1.ConditionFalse, Reason: "Failed", Message: "analysis error"},
-	}
-
-	objs := append([]client.Object{run, config}, defaultObjects()...)
-	fc := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(objs...).
-		WithStatusSubresource(run).Build()
-
-	r := &AgenticRunReconciler{Client: fc, Agent: newTestAgentCaller(), Namespace: "default"}
-
-	result, err := reconcileOnce(r, "fix-crash")
-	if err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-
-	got, getErr := getAgenticRun(r, "fix-crash")
-	if getErr != nil {
-		t.Fatalf("getAgenticRun: %v", getErr)
-	}
-	if got.Status.TerminalTime == nil {
-		t.Fatal("Failed run should have terminalTime stamped")
-	}
-	if result.RequeueAfter <= 0 {
-		t.Error("expected RequeueAfter > 0 for non-expired Failed run")
-	}
-}
-
-// TestHandleTerminalTTL_StampSyncsObservedGeneration guards against a
-// regression where stamping ttlAfterTerminal (a spec write) bumps
-// metadata.generation — on a real cluster, every accepted spec Patch does
-// this — while needsRevision() treats any generation > Analyzed.
-// observedGeneration as "revision requested." Since spec.revisionFeedback is
-// never cleared once processed, an internal TTL-stamping generation bump
-// left unsynced would spuriously re-arm the revision workflow later.
-//
-// The fake client used here (controller-runtime v0.23) does not simulate
-// apiserver-side generation incrementing on Patch, so this test seeds an
-// already-elevated Generation directly (as if a prior spec write, including
-// a pre-fix ttlAfterTerminal stamp, had already bumped it) to exercise the
-// sync logic in handleTerminalTTL deterministically.
-func TestHandleTerminalTTL_StampSyncsObservedGeneration(t *testing.T) {
-	config := &agenticv1alpha1.AgenticOLSConfig{
-		ObjectMeta: metav1.ObjectMeta{Name: "cluster"},
-		Spec: agenticv1alpha1.AgenticOLSConfigSpec{
-			Lifecycle: agenticv1alpha1.LifecycleConfig{TerminalTTL: ptr32(3600)},
-		},
-	}
-
-	run := testAgenticRun()
-	run.Generation = 5
-	// Stale feedback from a revision that was already fully processed;
-	// RevisionFeedback is never cleared by the controller.
-	run.Spec.RevisionFeedback = "please double check the fix"
-	run.Status.Conditions = []metav1.Condition{
-		{
-			Type:               agenticv1alpha1.AgenticRunConditionAnalyzed,
-			Status:             metav1.ConditionTrue,
-			Reason:             "Complete",
-			ObservedGeneration: 3, // stale relative to Generation=5
-		},
-		{Type: agenticv1alpha1.AgenticRunConditionVerified, Status: metav1.ConditionTrue, Reason: "Complete"},
-	}
-
-	objs := append([]client.Object{run, config}, defaultObjects()...)
-	fc := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(objs...).
-		WithStatusSubresource(run).Build()
-
-	r := &AgenticRunReconciler{Client: fc, Agent: newTestAgentCaller(), Namespace: "default"}
-
-	before, err := getAgenticRun(r, "fix-crash")
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if !needsRevision(before) {
-		t.Fatal("test setup invalid: expected needsRevision() true before the TTL stamp corrects observedGeneration")
-	}
-
-	if _, _, err := r.handleTerminalTTL(context.Background(), before); err != nil {
-		t.Fatalf("handleTerminalTTL: %v", err)
-	}
-
-	after, err := getAgenticRun(r, "fix-crash")
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if after.Spec.TTLAfterTerminal == nil || *after.Spec.TTLAfterTerminal != 3600 {
-		t.Fatalf("ttlAfterTerminal not stamped: %v", after.Spec.TTLAfterTerminal)
-	}
-	analyzed := meta.FindStatusCondition(after.Status.Conditions, agenticv1alpha1.AgenticRunConditionAnalyzed)
-	if analyzed == nil || analyzed.ObservedGeneration != after.Generation {
-		t.Fatalf("Analyzed.observedGeneration = %v, want %d (current generation)", analyzed, after.Generation)
-	}
-	if needsRevision(after) {
-		t.Error("stamping ttlAfterTerminal must not leave stale revisionFeedback able to spuriously re-trigger needsRevision()")
+	if got.Status.TerminalTime != nil || got.Status.DeleteAfter != nil || got.Labels[terminalTTLLabel] != "" || result.RequeueAfter != 0 {
+		t.Errorf("preserved run should skip terminal cleanup: %#v, %+v", got.Status, result)
 	}
 }

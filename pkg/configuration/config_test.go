@@ -163,6 +163,47 @@ func TestParseConfigMap_ToolOutputInspectionEnabled(t *testing.T) {
 	}
 }
 
+func TestTerminalTTLDaysFromConfigMap(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data map[string]string
+		want int32
+	}{
+		{name: "key absent", want: 14},
+		{name: "positive days", data: map[string]string{KeyTerminalTTLDays: "7"}, want: 7},
+		{name: "zero", data: map[string]string{KeyTerminalTTLDays: "0"}, want: 14},
+		{name: "negative", data: map[string]string{KeyTerminalTTLDays: "-2"}, want: 14},
+		{name: "empty", data: map[string]string{KeyTerminalTTLDays: ""}, want: 14},
+		{name: "fraction", data: map[string]string{KeyTerminalTTLDays: "1.5"}, want: 14},
+		{name: "not a number", data: map[string]string{KeyTerminalTTLDays: "soon"}, want: 14},
+		{name: "overflow", data: map[string]string{KeyTerminalTTLDays: "2147483648"}, want: 14},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cache := &Cache{}
+			if err := cache.OnConfigMapChange(context.Background(), &corev1.ConfigMap{Data: tc.data}); err != nil {
+				t.Fatalf("load ConfigMap: %v", err)
+			}
+			if cache.Get() == nil || cache.Get().TerminalTTLDays != tc.want {
+				t.Errorf("cached TTL = %v, want %d days", cache.Get(), tc.want)
+			}
+		})
+	}
+}
+
+func TestTerminalTTLDaysInvalidUpdateReplacesOldValue(t *testing.T) {
+	cache := &Cache{}
+	ctx := context.Background()
+	if err := cache.OnConfigMapChange(ctx, &corev1.ConfigMap{Data: map[string]string{KeyTerminalTTLDays: "3"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.OnConfigMapChange(ctx, &corev1.ConfigMap{Data: map[string]string{KeyTerminalTTLDays: "invalid"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := cache.Get().TerminalTTLDays; got != 14 {
+		t.Errorf("cached TTL after invalid update = %d, want 14", got)
+	}
+}
+
 func TestParseConfigMap_TLSFields(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		Data: map[string]string{

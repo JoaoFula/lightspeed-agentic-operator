@@ -759,11 +759,8 @@ func TestReconcile_RevisionFromCompleted(t *testing.T) {
 	}
 }
 
-// TestReconcile_RevisionClearsTerminalTime verifies that a run which already
-// carries a terminalTime (stamped by handleTerminalTTL, OLS-3566) has it
-// cleared once a revision moves it back out of the terminal phase --
-// otherwise a later terminal phase would compute TTL expiry off the stale,
-// earlier terminal event instead of a fresh one (run-lifecycle.md rule 23/24).
+// TestReconcile_RevisionClearsTerminalTime verifies revision clears the
+// previous terminal deadline and label so the next terminal phase gets a new one.
 func TestReconcile_RevisionClearsTerminalTime(t *testing.T) {
 	scheme := testScheme()
 	run := &agenticv1alpha1.AgenticRun{
@@ -801,13 +798,19 @@ func TestReconcile_RevisionClearsTerminalTime(t *testing.T) {
 		t.Fatalf("expected Completed, got %s", agenticv1alpha1.DerivePhase(p.Status.Conditions))
 	}
 
-	// Simulate handleTerminalTTL having already stamped terminalTime on an
-	// earlier reconcile of this terminal run.
-	staleTerminalTime := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+	// Simulate a previous terminal pass with a recorded deadline and label.
 	base := p.DeepCopy()
+	p.Labels = map[string]string{terminalTTLLabel: "true"}
+	if err := fc.Patch(context.Background(), p, client.MergeFrom(base)); err != nil {
+		t.Fatalf("label terminal run: %v", err)
+	}
+	staleTerminalTime := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+	deadline := metav1.NewTime(staleTerminalTime.Add(24 * time.Hour))
+	base = p.DeepCopy()
 	p.Status.TerminalTime = &staleTerminalTime
+	p.Status.DeleteAfter = &deadline
 	if err := fc.Status().Patch(context.Background(), p, client.MergeFrom(base)); err != nil {
-		t.Fatalf("stamp stale terminalTime: %v", err)
+		t.Fatalf("stamp stale terminal deadline: %v", err)
 	}
 
 	reviseAgenticRun(t, fc, "fix-crash", "re-analyse with different focus")
@@ -819,8 +822,8 @@ func TestReconcile_RevisionClearsTerminalTime(t *testing.T) {
 	if agenticv1alpha1.DerivePhase(p.Status.Conditions) != agenticv1alpha1.AgenticRunPhaseProposed {
 		t.Fatalf("expected Proposed after revision from Completed, got %s", agenticv1alpha1.DerivePhase(p.Status.Conditions))
 	}
-	if p.Status.TerminalTime != nil {
-		t.Errorf("expected terminalTime to be cleared once revision moves run out of terminal phase, got %v", p.Status.TerminalTime)
+	if p.Status.TerminalTime != nil || p.Status.DeleteAfter != nil || p.Labels[terminalTTLLabel] != "" {
+		t.Errorf("revision must clear terminalTime, deleteAfter and TTL label: status=%+v labels=%v", p.Status, p.Labels)
 	}
 }
 

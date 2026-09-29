@@ -29,17 +29,47 @@ func (r *AgenticRunReconciler) isSandboxClaimMode() bool {
 // runTimeoutLoop dispatches to the mode-appropriate timeout handler.
 // Stopped when ctx is cancelled (manager shutdown).
 func (r *AgenticRunReconciler) runTimeoutLoop(ctx context.Context) error {
-	for {
+	if err := r.sweepExpiredRuns(ctx); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to sweep expired AgenticRuns")
+	}
+	for i := 1; ; i++ {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-time.After(sandboxTimeoutCheckInterval):
-			r.handleTimeEvent(ctx)
+			r.handlePodTimeEvent(ctx)
+			if i%60 == 0 {
+				if err := r.sweepExpiredRuns(ctx); err != nil {
+					logf.FromContext(ctx).Error(err, "failed to sweep expired AgenticRuns")
+				}
+			}
 		}
 	}
 }
 
-// handleTimeEvent collects sandbox pods based on the current mode and
+func (r *AgenticRunReconciler) sweepExpiredRuns(ctx context.Context) error {
+	var runs agenticv1alpha1.AgenticRunList
+	if err := r.List(ctx, &runs, client.MatchingLabels{terminalTTLLabel: "true"}); err != nil {
+		return fmt.Errorf("list terminal AgenticRuns: %w", err)
+	}
+	now := time.Now()
+	for i := range runs.Items {
+		run := &runs.Items[i]
+		if run.Status.DeleteAfter == nil || now.Before(run.Status.DeleteAfter.Time) {
+			continue
+		}
+		phase := agenticv1alpha1.DerivePhase(run.Status.Conditions)
+		if !isTerminal(phase) || (phase == agenticv1alpha1.AgenticRunPhaseFailed && preserveFailedSandbox(run)) {
+			continue
+		}
+		if err := r.Delete(ctx, run); client.IgnoreNotFound(err) != nil {
+			logf.FromContext(ctx).Error(fmt.Errorf("%s: %w", ErrDeleteExpiredRun, err), "failed to delete expired AgenticRun", LogKeyName, run.Name)
+		}
+	}
+	return nil
+}
+
+// handlePodTimeEvent collects sandbox pods based on the current mode and
 // checks each for start/overall timeouts, retrying completion for
 // terminal pods whose step condition patch failed earlier.
 type podEntry struct {
@@ -51,7 +81,7 @@ type podEntry struct {
 	created time.Time
 }
 
-func (r *AgenticRunReconciler) handleTimeEvent(ctx context.Context) {
+func (r *AgenticRunReconciler) handlePodTimeEvent(ctx context.Context) {
 	log := logf.FromContext(ctx).WithName("sandbox-timeout")
 
 	var entries []podEntry
