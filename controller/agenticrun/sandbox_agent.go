@@ -36,6 +36,10 @@ const (
 	ReasonSandboxFailed         = "SandboxFailed"
 	ReasonAgentTimeout          = "AgentTimeout"
 
+	// Shared marker/reason: exact value in the sandbox handoff and AgenticRun condition.
+	ReasonToolResultSafetyInspectionFailed = "ToolResultSafetyInspectionFailed"
+	msgToolResultSafetyInspectionFailed    = "A possible security issue was detected in the tool output. The agentic run was stopped for safety."
+
 	// Pod start timeout — covers image pull, scheduling, resource limits, etc.
 	podStartTimeout = 5 * time.Minute
 

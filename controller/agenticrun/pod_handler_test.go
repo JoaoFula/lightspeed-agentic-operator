@@ -248,6 +248,42 @@ func TestCompleteStep_VerificationSystemFailure_Terminal(t *testing.T) {
 	}
 }
 
+func TestCompleteStep_ToolResultSafetyInspectionFailure(t *testing.T) {
+	ctx := context.Background()
+	r, run := newVerifyingReconciler(t)
+
+	pod := &corev1.Pod{Status: corev1.PodStatus{
+		Phase: corev1.PodFailed,
+		ContainerStatuses: []corev1.ContainerStatus{{
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+				ExitCode: 1,
+				Message:  ReasonToolResultSafetyInspectionFailed,
+			}},
+		}},
+	}}
+	if err := r.completeStep(ctx, run, pod, "verification", stepConditionType("verification"), "", ""); err != nil {
+		t.Fatalf("completeStep: %v", err)
+	}
+
+	got, err := getAgenticRun(r, "fix-crash")
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	verified := meta.FindStatusCondition(got.Status.Conditions, agenticv1alpha1.AgenticRunConditionVerified)
+	if verified == nil || verified.Status != metav1.ConditionFalse {
+		t.Fatalf("expected Verified=False, got %+v", verified)
+	}
+	if verified.Reason != "ToolResultSafetyInspectionFailed" {
+		t.Errorf("Verified reason = %q, want ToolResultSafetyInspectionFailed", verified.Reason)
+	}
+	if verified.Message != "A possible security issue was detected in the tool output. The agentic run was stopped for safety." {
+		t.Errorf("Verified message = %q", verified.Message)
+	}
+	if phase := agenticv1alpha1.DerivePhase(got.Status.Conditions); phase != agenticv1alpha1.AgenticRunPhaseFailed {
+		t.Errorf("phase = %s, want Failed", phase)
+	}
+}
+
 func TestAggregateTokenUsage(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -436,6 +472,18 @@ func TestPodFailMessage(t *testing.T) {
 				}},
 			}},
 			want: "OOMKilled",
+		},
+		{
+			name: "tool result safety inspection failure",
+			pod: &corev1.Pod{Status: corev1.PodStatus{
+				Phase: corev1.PodFailed,
+				ContainerStatuses: []corev1.ContainerStatus{{
+					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+						Message: ReasonToolResultSafetyInspectionFailed,
+					}},
+				}},
+			}},
+			want: "A possible security issue was detected in the tool output. The agentic run was stopped for safety.",
 		},
 		{
 			name: "failed with exit code",
