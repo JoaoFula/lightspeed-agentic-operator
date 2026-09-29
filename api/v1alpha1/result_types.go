@@ -27,6 +27,9 @@ const (
 	ResultReasonStepStarted = "StepStarted"
 	ResultReasonSucceeded   = "Succeeded"
 	ResultReasonFailed      = "Failed"
+	// ResultReasonAgentTimeout indicates cooperative expiration of the
+	// operator-provided whole-agent execution budget.
+	ResultReasonAgentTimeout = "AgentTimeout"
 )
 
 func (r *AnalysisResult) GetConditions() []metav1.Condition      { return r.Status.Conditions }

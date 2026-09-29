@@ -13,7 +13,10 @@ import (
 )
 
 const (
-	defaultSandboxTimeout = 5 * time.Minute
+	// activeDeadlineSeconds is measured from pod creation. The operator
+	// separately enforces the startup and startedAt-based running deadlines.
+	sandboxStartupTimeout = 5 * time.Minute
+	sandboxRunningGrace   = 1 * time.Minute
 
 	analysisStepTimeout     = 10 * time.Minute
 	executionStepTimeout    = 10 * time.Minute
@@ -25,21 +28,24 @@ const (
 	// Spec: .ai/spec/what/sandbox-execution.md, .ai/spec/what/run-lifecycle.md rule 14a.
 
 	// Step condition reasons (run-lifecycle.md rule 14a).
-	ReasonWaitingForSandbox = "WaitingForSandbox"
-	ReasonRunning           = "Running"
-	ReasonSucceeded         = "Succeeded"
-	ReasonSandboxTimeout    = "SandboxTimeout"
-	ReasonSandboxFailed     = "SandboxFailed"
+	ReasonWaitingForSandbox     = "WaitingForSandbox"
+	ReasonRunning               = "Running"
+	ReasonSucceeded             = "Succeeded"
+	ReasonSandboxTimeout        = "SandboxTimeout"
+	ReasonSandboxStartupTimeout = "SandboxStartupTimeout"
+	ReasonSandboxFailed         = "SandboxFailed"
+	ReasonAgentTimeout          = "AgentTimeout"
 
 	// Pod start timeout — covers image pull, scheduling, resource limits, etc.
 	podStartTimeout = 5 * time.Minute
 
 	// Input ConfigMap (sandbox-execution.md rule 7).
-	inputConfigMapMountPath = "/input"
-	inputConfigMapKeyQuery  = "query"
-	inputConfigMapKeySchema = "output-schema"
-	inputConfigMapKeyCtx    = "context"
-	inputConfigMapKeyTmpl   = "result-template"
+	inputConfigMapMountPath       = "/input"
+	inputConfigMapKeyQuery        = "query"
+	inputConfigMapKeySystemPrompt = "system-prompt"
+	inputConfigMapKeySchema       = "output-schema"
+	inputConfigMapKeyCtx          = "context"
+	inputConfigMapKeyTmpl         = "result-template"
 
 	// CRD maxLength limits for analysis option fields, injected into
 	// the LLM output schema so the model respects CRD constraints.
@@ -109,8 +115,8 @@ type agentPreviousAttempt struct {
 // Release handles all cleanup: pod deletion (GC handles children) plus
 // explicit cross-namespace/cluster-scoped RBAC teardown.
 type SandboxLifecycle interface {
-	Create(ctx context.Context, run *agenticv1alpha1.AgenticRun, step string, agent *agenticv1alpha1.Agent, llm *agenticv1alpha1.LLMProvider, tools *agenticv1alpha1.ToolsSpec, deadline time.Duration, query string, agentCtx *agentContext) (string, error)
-	Release(ctx context.Context, run *agenticv1alpha1.AgenticRun, step string) error
+	Create(ctx context.Context, run *agenticv1alpha1.AgenticRun, step string, agent *agenticv1alpha1.Agent, llm *agenticv1alpha1.LLMProvider, tools *agenticv1alpha1.ToolsSpec, deadline time.Duration, agentCtx *agentContext) (string, error)
+	Release(ctx context.Context, run *agenticv1alpha1.AgenticRun, step string, spoke *SpokeAccess) error
 }
 
 // SandboxAgentCaller implements AgentCaller by creating a sandbox pod
@@ -127,9 +133,8 @@ func stepString(step agenticv1alpha1.SandboxStep) string {
 	return strings.ToLower(string(step))
 }
 
-func (s *SandboxAgentCaller) Analyze(ctx context.Context, run *agenticv1alpha1.AgenticRun, step resolvedStep, requestText string) error {
-	query := buildAnalysisQuery(requestText, run)
-	return s.launchSandbox(ctx, run, stepString(agenticv1alpha1.SandboxStepAnalysis), step, query, buildAgentContext(run))
+func (s *SandboxAgentCaller) Analyze(ctx context.Context, run *agenticv1alpha1.AgenticRun, step resolvedStep) error {
+	return s.launchSandbox(ctx, run, stepString(agenticv1alpha1.SandboxStepAnalysis), step, buildAgentContext(run))
 }
 
 func (s *SandboxAgentCaller) Execute(ctx context.Context, run *agenticv1alpha1.AgenticRun, step resolvedStep, option *agenticv1alpha1.RemediationOption) error {
@@ -137,8 +142,7 @@ func (s *SandboxAgentCaller) Execute(ctx context.Context, run *agenticv1alpha1.A
 	if option != nil {
 		agentCtx.ApprovedOption = option
 	}
-	query := buildExecutionQuery(option)
-	return s.launchSandbox(ctx, run, stepString(agenticv1alpha1.SandboxStepExecution), step, query, agentCtx)
+	return s.launchSandbox(ctx, run, stepString(agenticv1alpha1.SandboxStepExecution), step, agentCtx)
 }
 
 func (s *SandboxAgentCaller) Verify(ctx context.Context, run *agenticv1alpha1.AgenticRun, step resolvedStep, option *agenticv1alpha1.RemediationOption, exec *ExecutionOutput) error {
@@ -147,12 +151,15 @@ func (s *SandboxAgentCaller) Verify(ctx context.Context, run *agenticv1alpha1.Ag
 		agentCtx.ApprovedOption = option
 	}
 	agentCtx.ExecutionResult = executionOutputToAgentResult(exec)
-	query := buildVerificationQuery(option, exec)
-	return s.launchSandbox(ctx, run, stepString(agenticv1alpha1.SandboxStepVerification), step, query, agentCtx)
+	return s.launchSandbox(ctx, run, stepString(agenticv1alpha1.SandboxStepVerification), step, agentCtx)
 }
 
-func (s *SandboxAgentCaller) Escalate(ctx context.Context, run *agenticv1alpha1.AgenticRun, step resolvedStep, requestText string) error {
-	return s.launchSandbox(ctx, run, stepString(agenticv1alpha1.SandboxStepEscalation), step, requestText, buildAgentContext(run))
+func (s *SandboxAgentCaller) Escalate(ctx context.Context, run *agenticv1alpha1.AgenticRun, step resolvedStep) error {
+	return s.launchSandbox(ctx, run, stepString(agenticv1alpha1.SandboxStepEscalation), step, buildAgentContext(run))
+}
+
+func sandboxPodDeadline(agent *agenticv1alpha1.Agent, step string) time.Duration {
+	return sandboxStartupTimeout + time.Duration(resolveTimeout(agent, step))*time.Second + sandboxRunningGrace
 }
 
 // launchSandbox delegates to SandboxLifecycle.Create which handles all setup
@@ -162,12 +169,20 @@ func (s *SandboxAgentCaller) launchSandbox(
 	run *agenticv1alpha1.AgenticRun,
 	stepName string,
 	step resolvedStep,
-	query string,
 	agentCtx *agentContext,
 ) error {
-	podDeadline := stepTimeout(stepName) + defaultSandboxTimeout
-	name, err := s.Sandbox.Create(ctx, run, stepName, step.Agent, step.LLM, step.Tools, podDeadline, query, agentCtx)
-	if err != nil {
+	// activeDeadlineSeconds is measured from pod creation, while the product
+	// running deadline starts at the main container's startedAt. Include the
+	// complete startup allowance here so Kubernetes cannot kill a pod before
+	// the operator's timestamp-derived deadline. The operator still enforces
+	// the precise startup/running clocks in timeout_handler.go.
+	podDeadline := sandboxPodDeadline(step.Agent, stepName)
+	var name string
+	if err := retryOnTransient(ctx, func() error {
+		var createErr error
+		name, createErr = s.Sandbox.Create(ctx, run, stepName, step.Agent, step.LLM, step.Tools, podDeadline, agentCtx)
+		return createErr
+	}); err != nil {
 		return fmt.Errorf("%s: %w", ErrClaimSandbox, err)
 	}
 
@@ -178,12 +193,26 @@ func (s *SandboxAgentCaller) launchSandbox(
 }
 
 func (s *SandboxAgentCaller) ReleaseSandbox(ctx context.Context, run *agenticv1alpha1.AgenticRun, step string) error {
-	return s.Sandbox.Release(ctx, run, step)
+	spoke, spokeErr := spokeAccessForRun(ctx, s.K8sClient, run, s.Namespace)
+	if spokeErr != nil {
+		logf.FromContext(ctx).Error(spokeErr, "release: spoke unreachable, skipping spoke cleanup")
+	}
+	if err := s.Sandbox.Release(ctx, run, step, spoke); err != nil {
+		return err
+	}
+	return spokeErr
 }
 
 func (s *SandboxAgentCaller) ReleaseSandboxes(ctx context.Context, run *agenticv1alpha1.AgenticRun) error {
 	log := logf.FromContext(ctx)
 	var firstErr error
+
+	// Resolve spoke access once for the entire teardown.
+	spoke, spokeErr := spokeAccessForRun(ctx, s.K8sClient, run, s.Namespace)
+	if spokeErr != nil {
+		log.Error(spokeErr, "release: spoke unreachable, skipping spoke cleanup")
+		firstErr = spokeErr
+	}
 
 	executionReleased := false
 	for _, step := range []string{"analysis", "execution", "verification", "escalation"} {
@@ -194,7 +223,7 @@ func (s *SandboxAgentCaller) ReleaseSandboxes(ctx context.Context, run *agenticv
 		if step == "execution" {
 			executionReleased = true
 		}
-		if err := s.Sandbox.Release(ctx, run, step); err != nil {
+		if err := s.Sandbox.Release(ctx, run, step, spoke); err != nil {
 			log.Error(err, "failed to release sandbox", LogKeyClaim, claimName, LogKeyStep, step)
 			if firstErr == nil {
 				firstErr = err
@@ -205,12 +234,10 @@ func (s *SandboxAgentCaller) ReleaseSandboxes(ctx context.Context, run *agenticv
 	// If execution RBAC was created (annotation present) but patchSandboxInfo
 	// failed (no claim name), Release("execution") was skipped above. Clean up
 	// the RBAC unconditionally to prevent leaks.
-	if !executionReleased && len(annotatedRBACNamespaces(run)) > 0 {
-		if err := cleanupExecutionRBAC(ctx, s.K8sClient, run); err != nil {
-			log.Error(err, "failed to clean up orphaned execution RBAC")
-			if firstErr == nil {
-				firstErr = err
-			}
+	if !executionReleased {
+		// spoke already resolved above.
+		if err := cleanupStepRBAC(ctx, spoke, s.K8sClient, s.Namespace, run, "execution"); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
 	return firstErr

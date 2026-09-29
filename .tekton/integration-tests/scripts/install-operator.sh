@@ -37,11 +37,31 @@ oc create namespace "${OPERATOR_NAMESPACE}" --dry-run=client -o yaml | oc apply 
 echo "Installing CRDs..."
 make install
 
+# Install Agent Sandbox operator when sandbox-claim mode is requested.
+if [ "${SANDBOX_MODE}" = "sandbox-claim" ]; then
+  AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION:-v1.0.0}"
+  AGENT_SANDBOX_RELEASE_BASE="https://github.com/kubernetes-sigs/agent-sandbox/releases/download"
+  echo "Installing Agent Sandbox operator ${AGENT_SANDBOX_VERSION}..."
+  oc apply -f "${AGENT_SANDBOX_RELEASE_BASE}/${AGENT_SANDBOX_VERSION}/sandbox.yaml"
+  oc apply -f "${AGENT_SANDBOX_RELEASE_BASE}/${AGENT_SANDBOX_VERSION}/extensions.yaml"
+  echo "Waiting for Sandbox CRDs to be established..."
+  oc wait --for=condition=Established crd/sandboxes.agents.x-k8s.io --timeout=60s
+  oc wait --for=condition=Established crd/sandboxclaims.extensions.agents.x-k8s.io --timeout=60s
+  oc wait --for=condition=Established crd/sandboxtemplates.extensions.agents.x-k8s.io --timeout=60s
+  oc wait --for=condition=Established crd/sandboxwarmpools.extensions.agents.x-k8s.io --timeout=60s
+  echo "Waiting for Agent Sandbox controller to be ready..."
+  oc rollout status deployment/agent-sandbox-controller -n agent-sandbox-system --timeout=120s
+  echo "Agent Sandbox operator installed"
+else
+  echo "Skipping Agent Sandbox operator install (SANDBOX_MODE=${SANDBOX_MODE})"
+fi
+
 # Deploy operator (kustomize-based).
 echo "Deploying operator..."
 make deploy IMG="${IMG}" OPERATOR_NAMESPACE="${OPERATOR_NAMESPACE}" SANDBOX_MODE="${SANDBOX_MODE}"
 
-# Grant cluster-admin to operator SA (same as quickstart — covers escalation + SCC).
+# Grant cluster-admin to the operator SA in the disposable E2E cluster.
+# The operator dynamically creates bindings for sandbox ServiceAccounts.
 echo "Granting cluster-admin to operator SA..."
 oc apply -f - <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
@@ -74,6 +94,34 @@ subjects:
   name: lightspeed-agent
   namespace: ${OPERATOR_NAMESPACE}
 EOF
+
+# Validate the special RBAC delegation checks used by the sandbox lifecycle.
+# The operator creates and updates bindings dynamically, so ordinary create/update
+# permissions are not sufficient: Kubernetes also requires bind/escalate.
+OPERATOR_SUBJECT="system:serviceaccount:${OPERATOR_NAMESPACE}:controller-manager"
+check_operator_can() {
+  local description="$1"
+  shift
+  if ! oc auth can-i --quiet "$@" --as="${OPERATOR_SUBJECT}"; then
+    echo "ERROR: ${OPERATOR_SUBJECT} cannot ${description}" >&2
+    exit 1
+  fi
+}
+
+echo "Validating operator RBAC delegation..."
+check_operator_can "update the reader ClusterRoleBinding" \
+  update clusterrolebindings.rbac.authorization.k8s.io/lightspeed-agent-cluster-reader
+check_operator_can "bind the cluster-reader ClusterRole" \
+  bind clusterroles.rbac.authorization.k8s.io/cluster-reader
+check_operator_can "bind generated ClusterRoles" \
+  bind clusterroles.rbac.authorization.k8s.io
+check_operator_can "escalate generated ClusterRoles" \
+  escalate clusterroles.rbac.authorization.k8s.io
+check_operator_can "bind generated Roles in all namespaces" \
+  bind roles --all-namespaces
+check_operator_can "escalate generated Roles in all namespaces" \
+  escalate roles --all-namespaces
+echo "Operator RBAC delegation validated"
 
 # --- OTEL Collector (debug exporter for trace verification) ---
 
@@ -309,7 +357,6 @@ kind: ApprovalPolicy
 metadata:
   name: cluster
 spec:
-  maxAttempts: 3
   maxConcurrentRuns: 5
   stages:
   - name: Analysis

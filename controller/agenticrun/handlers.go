@@ -18,14 +18,13 @@ const (
 	ErrUpdateToAnalyzingRevision = "update to Analyzing (revision)"
 	ErrUpdateToCompletedAdvisory = "update to Completed (advisory)"
 	ErrUpdateAfterExecSkip       = "update after execution skip"
-
-	ErrUpdateToExecuting        = "update to Executing"
-	ErrUpdateToVerifying        = "update to Verifying"
-	ErrResolveSelectedOption    = "resolve selected option"
-	ErrGetOverrideAgent         = "get override Agent"
-	ErrGetEscalationLLMProvider = "get LLMProvider"
-	ErrUpdateToEscalating       = "update to Escalating"
-	ErrUpdateToDenied           = "update to Denied"
+	ErrUpdateToExecuting         = "update to Executing"
+	ErrUpdateToVerifying         = "update to Verifying"
+	ErrResolveSelectedOption     = "resolve selected option"
+	ErrGetOverrideAgent          = "get override Agent"
+	ErrGetEscalationLLMProvider  = "get LLMProvider"
+	ErrUpdateToEscalating        = "update to Escalating"
+	ErrUpdateToDenied            = "update to Denied"
 )
 
 // handleAnalysis checks approval for the analysis step and runs it.
@@ -75,7 +74,7 @@ func (r *AgenticRunReconciler) handleAnalysis(
 		return ctrl.Result{}, fmt.Errorf("%s: %w", ErrUpdateToAnalyzing, err)
 	}
 
-	if err := r.Agent.Analyze(ctx, run, resolved.Analysis, run.Spec.Request); err != nil {
+	if err := r.Agent.Analyze(ctx, run, resolved.Analysis); err != nil {
 		return r.failStep(ctx, run, agenticv1alpha1.AgenticRunConditionAnalyzed, err)
 	}
 
@@ -121,10 +120,7 @@ func (r *AgenticRunReconciler) handleRevision(
 		return ctrl.Result{}, fmt.Errorf("%s: %w", ErrUpdateToAnalyzingRevision, err)
 	}
 
-	revisionSuffix := buildRevisionContext(run)
-	requestWithRevision := run.Spec.Request + "\n\n" + revisionSuffix
-
-	if err := r.Agent.Analyze(ctx, run, resolved.Analysis, requestWithRevision); err != nil {
+	if err := r.Agent.Analyze(ctx, run, resolved.Analysis); err != nil {
 		return r.failStep(ctx, run, agenticv1alpha1.AgenticRunConditionAnalyzed, err)
 	}
 
@@ -311,11 +307,32 @@ func (r *AgenticRunReconciler) handleFailed(
 	log := logf.FromContext(ctx)
 	log.Info("handling system failure (terminal)")
 
-	if run.Annotations[rbacNamespacesAnnotation] != "" {
-		if err := cleanupExecutionRBAC(ctx, r.Client, run); err != nil {
-			log.Error(err, "RBAC cleanup on failure")
+	if preserveFailedSandbox(run) {
+		log.Info("preserving failed sandbox for debugging")
+		return ctrl.Result{}, nil
+	}
+
+	spoke, spokeErr := spokeAccessForRun(ctx, r.Client, run, r.Namespace)
+	if spokeErr != nil {
+		log.Error(spokeErr, "RBAC cleanup: spoke unreachable")
+	}
+
+	// Clean SAs, reader CRBs, and execution RBAC for all steps.
+	// Spoke: per-run CRBs + SAs on spoke. Hub: per-run CRBs + execution RBAC.
+	for _, step := range []string{"analysis", "execution", "verification", "escalation"} {
+		// Hub path: only clean execution RBAC if annotation is present (SAs are GC'd via owner refs).
+		// Spoke path: always clean all steps.
+		if spoke == nil && step != "execution" {
+			continue
+		}
+		if spoke == nil && run.Annotations[rbacNamespacesAnnotation] == "" {
+			continue
+		}
+		if err := cleanupStepRBAC(ctx, spoke, r.Client, r.Namespace, run, step); err != nil {
+			log.Error(err, "RBAC cleanup on failure", LogKeyStep, step)
 		}
 	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -379,7 +396,8 @@ func (r *AgenticRunReconciler) handleEscalation(
 
 	escalated := meta.FindStatusCondition(run.Status.Conditions, agenticv1alpha1.AgenticRunConditionEscalated)
 	if escalated != nil {
-		if escalated.Status == metav1.ConditionUnknown && escalated.Reason == reasonInProgress {
+		if escalated.Status == metav1.ConditionUnknown &&
+			(escalated.Reason == reasonInProgress || escalated.Reason == ReasonRunning || escalated.Reason == ReasonWaitingForSandbox) {
 			log.V(1).Info("escalation already in progress, waiting")
 			return ctrl.Result{}, nil
 		}
@@ -414,8 +432,7 @@ func (r *AgenticRunReconciler) handleEscalation(
 		return ctrl.Result{}, fmt.Errorf("%s: %w", ErrUpdateToEscalating, err)
 	}
 
-	escalationText := buildEscalationRequest(run, r.Namespace)
-	if err := r.Agent.Escalate(ctx, run, step, escalationText); err != nil {
+	if err := r.Agent.Escalate(ctx, run, step); err != nil {
 		return r.failStep(ctx, run, agenticv1alpha1.AgenticRunConditionEscalated, err)
 	}
 

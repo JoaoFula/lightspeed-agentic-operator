@@ -64,19 +64,19 @@ func ensureAgenticRunApproval(
 			switch ps.Name {
 			case agenticv1alpha1.SandboxStepAnalysis:
 				autoStages = append(autoStages, agenticv1alpha1.NewApprovalStage(
-					agenticv1alpha1.ApprovalStageAnalysis, "", "", nil, 0))
+					agenticv1alpha1.ApprovalStageAnalysis, "", "", nil))
 			case agenticv1alpha1.SandboxStepExecution:
 				if run.Spec.Execution.IsZero() {
 					continue
 				}
 				autoStages = append(autoStages, agenticv1alpha1.NewApprovalStage(
-					agenticv1alpha1.ApprovalStageExecution, "", "", nil, 0))
+					agenticv1alpha1.ApprovalStageExecution, "", "", nil))
 			case agenticv1alpha1.SandboxStepVerification:
 				if run.Spec.Verification.IsZero() {
 					continue
 				}
 				autoStages = append(autoStages, agenticv1alpha1.NewApprovalStage(
-					agenticv1alpha1.ApprovalStageVerification, "", "", nil, 0))
+					agenticv1alpha1.ApprovalStageVerification, "", "", nil))
 			case agenticv1alpha1.SandboxStepEscalation:
 				continue
 			}
@@ -123,6 +123,27 @@ func isStageApproved(approval *agenticv1alpha1.AgenticRunApproval, policy *agent
 			if ps.Name == stage && ps.Approval == agenticv1alpha1.ApprovalModeAutomatic {
 				return true
 			}
+		}
+	}
+	// Escalation is read-only — it produces a human-readable summary of a failed
+	// run for an operator, with no cluster mutations or RBAC grants. It therefore
+	// auto-approves by default so a verification failure is never stranded at the
+	// Escalating phase on clusters with no ApprovalPolicy. An admin can still gate
+	// it (e.g. to cap LLM token spend) with an explicit Escalation: Manual policy
+	// stage, which falls through to the return below.
+	if stage == agenticv1alpha1.SandboxStepEscalation && !isStagePolicyManual(policy, stage) {
+		return true
+	}
+	return false
+}
+
+func isStagePolicyManual(policy *agenticv1alpha1.ApprovalPolicy, stage agenticv1alpha1.SandboxStep) bool {
+	if policy == nil {
+		return false
+	}
+	for _, ps := range policy.Spec.Stages {
+		if ps.Name == stage && ps.Approval == agenticv1alpha1.ApprovalModeManual {
+			return true
 		}
 	}
 	return false

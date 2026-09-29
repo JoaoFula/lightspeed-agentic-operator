@@ -39,16 +39,20 @@ const (
 	AgenticRunPhaseEscalating       AgenticRunPhase = "Escalating"
 	AgenticRunPhaseEscalated        AgenticRunPhase = "Escalated"
 	AgenticRunPhaseEmergencyStopped AgenticRunPhase = "EmergencyStopped"
-	AgenticRunPhaseNoActionRequired AgenticRunPhase = "NoActionRequired"
 )
 
 // Condition reasons used by DerivePhase for state transitions.
 // SYNC: must match derivePhaseFromConditions in lightspeed-agentic-console/src/models/agenticrun.ts
 const (
-	ReasonRetryingExecution = "RetryingExecution"
-	ReasonRetriesExhausted  = "RetriesExhausted"
-	ReasonNoActionRequired  = "NoActionRequired"
+	ReasonNoActionRequired = "NoActionRequired"
 )
+
+// ReasonVerificationFailed is the condition reason set on both Verified=False
+// and Escalated=Unknown when verification does not pass and the run escalates.
+// It is a cross-file contract: the controller writes it and tests assert it.
+// Not consumed by DerivePhase (which routes on Escalated status, not reason),
+// so it is intentionally outside the console SYNC block above.
+const ReasonVerificationFailed = "VerificationFailed"
 
 // DerivePhase computes the display phase from conditions. Conditions are
 // the source of truth; this function maps them to a human-friendly phase
@@ -93,9 +97,6 @@ func DerivePhase(conditions []metav1.Condition) AgenticRunPhase {
 		case metav1.ConditionUnknown:
 			return AgenticRunPhaseVerifying
 		default:
-			if c.Reason == ReasonRetryingExecution {
-				return AgenticRunPhaseExecuting
-			}
 			return AgenticRunPhaseFailed
 		}
 	}
@@ -115,7 +116,7 @@ func DerivePhase(conditions []metav1.Condition) AgenticRunPhase {
 		switch c.Status {
 		case metav1.ConditionTrue:
 			if c.Reason == ReasonNoActionRequired {
-				return AgenticRunPhaseNoActionRequired
+				return AgenticRunPhaseCompleted
 			}
 			return AgenticRunPhaseProposed
 		case metav1.ConditionUnknown:
@@ -226,8 +227,9 @@ func (a AnalysisOutput) IsZero() bool {
 //	Executed=True       -> execution complete
 //	Verified=Unknown    -> verification in progress
 //	Verified=True       -> verification passed (terminal: success)
+//	Verified=False      -> verification failed; run escalates (Escalated=Unknown)
 //	Denied=True         -> user denied a step (terminal)
-//	Escalated=True      -> max retries exhausted (terminal)
+//	Escalated=True      -> escalation complete (terminal)
 //	Any condition=False -> step failed; check reason and message
 const (
 	// AgenticRunConditionAnalyzed indicates whether analysis has completed.
@@ -253,8 +255,7 @@ const (
 )
 
 // AgenticRunStep defines per-step configuration on an AgenticRun. The agent
-// field selects which cluster-scoped Agent CR handles this step. The
-// tools field provides per-step tools that replace the shared spec.tools.
+// field selects which cluster-scoped Agent CR handles this step.
 // +kubebuilder:validation:MinProperties=1
 type AgenticRunStep struct {
 	// agent is the name of the cluster-scoped Agent CR to use for this step.
@@ -264,15 +265,10 @@ type AgenticRunStep struct {
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:XValidation:rule="!format.dns1123Subdomain().validate(self).hasValue()",message="must be a valid DNS subdomain: lowercase alphanumeric characters, hyphens, and dots"
 	Agent string `json:"agent,omitempty"`
-
-	// tools provides per-step tools that replace the shared spec.tools
-	// for this step. Use this when different steps need different skills.
-	// +optional
-	Tools ToolsSpec `json:"tools,omitzero"`
 }
 
 func (s AgenticRunStep) IsZero() bool {
-	return s.Agent == "" && s.Tools.IsZero()
+	return s.Agent == ""
 }
 
 // AgenticRunSpec defines the desired state of AgenticRun.
@@ -283,6 +279,7 @@ func (s AgenticRunStep) IsZero() bool {
 //
 // +kubebuilder:validation:XValidation:rule="has(self.analysis)",message="analysis must be provided"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.targetNamespaces) || (has(self.targetNamespaces) && self.targetNamespaces == oldSelf.targetNamespaces)",message="targetNamespaces is immutable once set"
+// +kubebuilder:validation:XValidation:rule="has(self.targetCluster) == has(oldSelf.targetCluster) && (!has(self.targetCluster) || self.targetCluster == oldSelf.targetCluster)",message="targetCluster is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.analysisOutput) || (has(self.analysisOutput) && self.analysisOutput == oldSelf.analysisOutput)",message="analysisOutput is immutable once set"
 // +kubebuilder:validation:XValidation:rule="!has(self.analysisOutput) || self.analysisOutput.mode != 'Minimal' || (!has(self.execution) && !has(self.verification))",message="analysisOutput mode Minimal is only allowed for analysis-only runs (no execution or verification steps)"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.tools) || (has(self.tools) && self.tools == oldSelf.tools)",message="tools is immutable once set"
@@ -323,6 +320,19 @@ type AgenticRunSpec struct {
 	// +kubebuilder:validation:items:MaxLength=63
 	TargetNamespaces []string `json:"targetNamespaces,omitempty"`
 
+	// targetCluster optionally references a spoke cluster by name.
+	// When set, the operator creates ephemeral service accounts and
+	// RBAC on the spoke cluster via the standing kubeconfig Secret
+	// (spoke-kubeconfig-{targetCluster}). When empty, the run
+	// targets the local (hub) cluster.
+	//
+	// Immutable: RBAC scoping is fixed at creation.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=236
+	// +kubebuilder:validation:XValidation:rule="!format.dns1123Subdomain().validate(self).hasValue()",message="targetCluster must be a valid DNS subdomain"
+	TargetCluster string `json:"targetCluster,omitempty"`
+
 	// analysisOutput configures the analysis step's structured output.
 	// The mode field controls which built-in properties are included
 	// (Default: all; Minimal: only title). The schema field optionally
@@ -335,35 +345,27 @@ type AgenticRunSpec struct {
 	// +optional
 	AnalysisOutput AnalysisOutput `json:"analysisOutput,omitzero"`
 
-	// tools defines the default tools for all steps: skills images,
-	// MCP servers, and required secrets. Per-step tools
-	// (analysis.tools, execution.tools, verification.tools) replace
-	// this default for individual steps.
+	// tools defines the tools available to every configured step: analysis,
+	// execution, verification, and escalation. It includes skills images,
+	// MCP servers, and required secrets.
 	//
-	// Immutable: the skills and secrets available to the agent are
-	// fixed at creation. Changing tools mid-flight could violate the
-	// assumptions of an in-progress analysis or execution.
+	// Immutable: the tools available to the agent are fixed at creation.
+	// Changing tools mid-flight could violate the assumptions of an
+	// in-progress analysis or execution.
 	// +optional
 	Tools ToolsSpec `json:"tools,omitzero"`
 
-	// analysis defines per-step configuration for the analysis step,
-	// including which agent handles it and any per-step tools.
-	//
-	// Immutable: agent and per-step tools are fixed at creation.
+	// analysis defines the agent used for the analysis step.
 	// +required
 	Analysis AgenticRunStep `json:"analysis,omitzero"`
 
-	// execution defines per-step configuration for the execution step.
+	// execution defines the agent used for the execution step.
 	// Omit to skip execution (advisory/assisted patterns).
-	//
-	// Immutable: agent and per-step tools are fixed at creation.
 	// +optional
 	Execution AgenticRunStep `json:"execution,omitzero"`
 
-	// verification defines per-step configuration for the verification step.
+	// verification defines the agent used for the verification step.
 	// Omit to skip verification.
-	//
-	// Immutable: agent and per-step tools are fixed at creation.
 	// +optional
 	Verification AgenticRunStep `json:"verification,omitzero"`
 
@@ -384,7 +386,7 @@ type AgenticRunSpec struct {
 
 	// ttlAfterTerminal is the time-to-live in seconds for this AgenticRun
 	// after it reaches a terminal state (Completed, Failed, Denied,
-	// Escalated, EmergencyStopped, NoActionRequired). When the TTL expires,
+	// Escalated, EmergencyStopped). When the TTL expires,
 	// the operator deletes the AgenticRun CR and Kubernetes garbage
 	// collection cascades deletion to owned resources.
 	//
@@ -407,7 +409,7 @@ type AgenticRunSpec struct {
 // AgenticRunStatus defines the observed state of AgenticRun. All fields are
 // set by the operator -- users should not modify status fields directly.
 // The status provides complete observability into the run's progress,
-// including per-step results, retry history, and standard Kubernetes conditions.
+// including per-step results and standard Kubernetes conditions.
 // An empty status (`status: {}`) is the initial state before the operator's
 // first reconcile.
 //
@@ -431,9 +433,14 @@ type AgenticRunStatus struct {
 	// +optional
 	Steps StepsStatus `json:"steps,omitzero"`
 
+	// tokenUsage is the cumulative token usage across all completed steps.
+	// Absent when no steps have completed with token data.
+	// +optional
+	TokenUsage TokenUsage `json:"tokenUsage,omitzero"`
+
 	// terminalTime is the timestamp when the run reached its current
 	// terminal state (Completed, Failed, Denied, Escalated,
-	// EmergencyStopped, NoActionRequired). Set once by the operator and not
+	// EmergencyStopped). Set once by the operator and not
 	// updated again while the run remains terminal; cleared when a
 	// revision request moves the run out of a terminal phase back into
 	// analysis, so a later terminal phase gets a fresh timestamp.
@@ -494,7 +501,8 @@ type AgenticRunStatus struct {
 //	            name: ACS_API_TOKEN
 //	  analysis:
 //	    agent: smart
-//	  execution: {}
+//	  execution:
+//	    agent: default
 //	  verification:
 //	    agent: fast
 type AgenticRun struct {

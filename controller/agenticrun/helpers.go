@@ -5,11 +5,15 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
+	"net"
 	"reflect"
+	"strings"
 	"text/template"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -23,17 +27,59 @@ import (
 //go:embed templates/*.tmpl
 var templateFS embed.FS
 
-var templates = template.Must(template.ParseFS(templateFS, "templates/*.tmpl"))
+// maxRenderedTemplateSize allows up to 32,768 Unicode characters encoded as UTF-8 (worst case: 4 bytes each).
+const maxRenderedTemplateSize = 32768 * 4 // 131 KiB byte bound on rendered output
 
-func renderTemplate(name string, data any) string {
-	var buf bytes.Buffer
-	if err := templates.ExecuteTemplate(&buf, name, data); err != nil {
-		return fmt.Sprintf("(template %q error: %v)", name, err)
+type limitedWriter struct {
+	buf   bytes.Buffer
+	limit int64
+}
+
+func (w *limitedWriter) Write(p []byte) (int, error) {
+	if int64(w.buf.Len())+int64(len(p)) > int64(w.limit) {
+		return 0, fmt.Errorf("rendered template exceeds %d bytes", w.limit)
 	}
-	return buf.String()
+	return w.buf.Write(p)
+}
+
+func (w *limitedWriter) String() string {
+	return w.buf.String()
+}
+
+func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+}
+
+func preserveFailedSandbox(run *agenticv1alpha1.AgenticRun) bool {
+	return run != nil && strings.EqualFold(strings.TrimSpace(run.Annotations[preserveSandboxAnnotation]), "true")
+}
+
+func renderTemplate(tmpl string, data any) (string, error) {
+	t, err := template.New("custom").Parse(tmpl)
+	if err != nil {
+		return "", fmt.Errorf("template parse: %w", err)
+	}
+	t = t.Funcs(template.FuncMap{}) // Restrict to default safe functions only
+	w := &limitedWriter{limit: maxRenderedTemplateSize}
+	if err := t.Execute(w, data); err != nil {
+		return "", fmt.Errorf("template exec: %w", err)
+	}
+	return w.String(), nil
+}
+
+// readBuiltinTemplate reads a built-in template file from the embedded FS.
+func readBuiltinTemplate(name string) (string, error) {
+	content, err := templateFS.ReadFile(name)
+	if err != nil {
+		return "", fmt.Errorf("read built-in template %s: %w", name, err)
+	}
+	return string(content), nil
 }
 
 const (
+	preserveSandboxAnnotation = "agentic.openshift.io/preserve-sandbox"
+	cleanupTimeout            = 30 * time.Second
+
 	ErrGetAnalysisResult         = "get AnalysisResult"
 	ErrTrimAnalysisResultOptions = "trim AnalysisResult options"
 
@@ -62,7 +108,60 @@ const (
 	LogKeyPhase     = "phase"
 	LogKeyClaim     = "claimName"
 	LogKeyCondition = "condition"
+
+	maxCreateRetries = 3
 )
+
+// retryBaseDelay is the base delay for exponential backoff between transient
+// retries. Package-level var so tests can override it.
+var retryBaseDelay = 5 * time.Second
+
+// isTransient returns true for Kubernetes API errors that are likely to
+// succeed on retry (server timeouts, throttling, temporary unavailability).
+func isTransient(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.IsServerTimeout(err) || errors.IsTimeout(err) ||
+		errors.IsTooManyRequests(err) || errors.IsServiceUnavailable(err) ||
+		errors.IsInternalError(err) || errors.IsConflict(err) {
+		return true
+	}
+	var netErr net.Error
+	return stderrors.As(err, &netErr)
+}
+
+// retryBackoff returns the delay before the given attempt (1-indexed).
+// Uses exponential backoff: 5s, 10s, 20s, …
+func retryBackoff(attempt int) time.Duration {
+	return retryBaseDelay * (1 << (attempt - 1))
+}
+
+// retryOnTransient calls fn up to maxCreateRetries times, retrying only
+// when the error is transient. Permanent errors and context cancellation
+// are returned immediately.
+func retryOnTransient(ctx context.Context, fn func() error) error {
+	log := logf.FromContext(ctx)
+	var lastErr error
+	for attempt := 1; attempt <= maxCreateRetries; attempt++ {
+		if err := fn(); err == nil {
+			return nil
+		} else if !isTransient(err) {
+			return err
+		} else {
+			lastErr = err
+		}
+		log.Info("transient failure, retrying", "attempt", attempt, "maxRetries", maxCreateRetries, "error", lastErr)
+		if attempt < maxCreateRetries {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(retryBackoff(attempt)):
+			}
+		}
+	}
+	return lastErr
+}
 
 func isSuspended(ctx context.Context, c client.Client) (bool, error) {
 	var config agenticv1alpha1.AgenticOLSConfig
@@ -164,10 +263,15 @@ func terminalReason(run *agenticv1alpha1.AgenticRun) string {
 
 func isTerminal(phase agenticv1alpha1.AgenticRunPhase) bool {
 	switch phase {
-	case agenticv1alpha1.AgenticRunPhaseCompleted, agenticv1alpha1.AgenticRunPhaseFailed, agenticv1alpha1.AgenticRunPhaseDenied, agenticv1alpha1.AgenticRunPhaseEscalated, agenticv1alpha1.AgenticRunPhaseEmergencyStopped, agenticv1alpha1.AgenticRunPhaseNoActionRequired:
+	case agenticv1alpha1.AgenticRunPhaseCompleted, agenticv1alpha1.AgenticRunPhaseFailed, agenticv1alpha1.AgenticRunPhaseDenied, agenticv1alpha1.AgenticRunPhaseEscalated, agenticv1alpha1.AgenticRunPhaseEmergencyStopped:
 		return true
 	}
 	return false
+}
+
+func isNoActionRequired(run *agenticv1alpha1.AgenticRun) bool {
+	c := meta.FindStatusCondition(run.Status.Conditions, agenticv1alpha1.AgenticRunConditionAnalyzed)
+	return c != nil && c.Status == metav1.ConditionTrue && c.Reason == reasonNoActionRequired
 }
 
 func setVerificationSkipped(run *agenticv1alpha1.AgenticRun) {
@@ -239,25 +343,6 @@ func resetExecutionAndVerification(steps *agenticv1alpha1.StepsStatus) {
 	steps.Verification.Sandbox = agenticv1alpha1.SandboxInfo{}
 }
 
-func maxAttempts(approval *agenticv1alpha1.AgenticRunApproval, policy *agenticv1alpha1.ApprovalPolicy) int {
-	ceiling := 1
-	if policy != nil && policy.Spec.MaxAttempts > 0 {
-		ceiling = int(policy.Spec.MaxAttempts)
-	}
-	if approval != nil {
-		for _, s := range approval.Spec.Stages {
-			if s.Type == agenticv1alpha1.ApprovalStageExecution && s.Execution != nil && s.Execution.MaxAttempts > 0 {
-				v := int(s.Execution.MaxAttempts)
-				if v > ceiling {
-					return ceiling
-				}
-				return v
-			}
-		}
-	}
-	return ceiling
-}
-
 type escalationData struct {
 	Name                string
 	Namespace           string
@@ -268,7 +353,11 @@ type escalationData struct {
 	VerificationResults []agenticv1alpha1.StepResultRef
 }
 
-func buildEscalationRequest(run *agenticv1alpha1.AgenticRun, resultNamespace string) string {
+func buildEscalationRequest(run *agenticv1alpha1.AgenticRun, resultNamespace string) (string, error) {
+	tmpl, err := readBuiltinTemplate("templates/escalation_request.tmpl")
+	if err != nil {
+		return "", err
+	}
 	data := escalationData{
 		Name:                run.Name,
 		Namespace:           run.Namespace,
@@ -278,7 +367,7 @@ func buildEscalationRequest(run *agenticv1alpha1.AgenticRun, resultNamespace str
 		ExecutionResults:    run.Status.Steps.Execution.Results,
 		VerificationResults: run.Status.Steps.Verification.Results,
 	}
-	return renderTemplate("escalation_request.tmpl", data)
+	return renderTemplate(tmpl, data)
 }
 
 func needsRevision(run *agenticv1alpha1.AgenticRun) bool {
@@ -299,14 +388,18 @@ type revisionData struct {
 	Feedback       string
 }
 
-func buildRevisionContext(run *agenticv1alpha1.AgenticRun) string {
+func buildRevisionContext(run *agenticv1alpha1.AgenticRun) (string, error) {
+	tmpl, err := readBuiltinTemplate("templates/revision_context.tmpl")
+	if err != nil {
+		return "", err
+	}
 	data := revisionData{
 		Generation:     run.Generation,
 		AgenticRunName: run.Name,
 		Namespace:      run.Namespace,
 		Feedback:       run.Spec.RevisionFeedback,
 	}
-	return renderTemplate("revision_context.tmpl", data)
+	return renderTemplate(tmpl, data)
 }
 
 func prettyJSON(v interface{}) string {
@@ -330,8 +423,12 @@ type analysisQuery struct {
 	HasVerification bool
 }
 
-func buildAnalysisQuery(requestText string, run *agenticv1alpha1.AgenticRun) string {
-	return renderTemplate("analysis_query.tmpl", analysisQuery{
+func buildAnalysisQuery(requestText string, run *agenticv1alpha1.AgenticRun) (string, error) {
+	tmpl, err := readBuiltinTemplate("templates/analysis_query.tmpl")
+	if err != nil {
+		return "", err
+	}
+	return renderTemplate(tmpl, analysisQuery{
 		Request:         requestText,
 		HasExecution:    !run.Spec.Execution.IsZero(),
 		HasVerification: !run.Spec.Verification.IsZero(),
@@ -342,18 +439,7 @@ type executionQuery struct {
 	OptionJSON string
 }
 
-func buildExecutionQuery(option *agenticv1alpha1.RemediationOption) string {
-	return renderTemplate("execution_query.tmpl", executionQuery{OptionJSON: prettyJSON(option)})
-}
-
 type verificationQuery struct {
 	OptionJSON    string
 	ExecutionJSON string
-}
-
-func buildVerificationQuery(option *agenticv1alpha1.RemediationOption, exec *ExecutionOutput) string {
-	return renderTemplate("verification_query.tmpl", verificationQuery{
-		OptionJSON:    prettyJSON(option),
-		ExecutionJSON: prettyJSON(executionOutputToAgentResult(exec)),
-	})
 }

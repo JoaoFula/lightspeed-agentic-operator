@@ -123,12 +123,46 @@ func TestEnsureAgenticRunApproval_NoPolicy(t *testing.T) {
 	}
 }
 
+// Escalation is read-only, so it auto-approves by default (no policy / not
+// listed) and gates only when the policy lists it explicitly as Manual. The
+// mutating steps keep the default-Manual behavior (no policy => not approved).
+func TestIsStageApproved_EscalationDefaultsAutomatic(t *testing.T) {
+	esc := agenticv1alpha1.SandboxStepEscalation
+	exec := agenticv1alpha1.SandboxStepExecution
+
+	stage := func(name agenticv1alpha1.SandboxStep, mode agenticv1alpha1.ApprovalMode) *agenticv1alpha1.ApprovalPolicy {
+		return &agenticv1alpha1.ApprovalPolicy{Spec: agenticv1alpha1.ApprovalPolicySpec{
+			Stages: []agenticv1alpha1.ApprovalPolicyStage{{Name: name, Approval: mode}},
+		}}
+	}
+
+	tests := []struct {
+		name   string
+		policy *agenticv1alpha1.ApprovalPolicy
+		step   agenticv1alpha1.SandboxStep
+		want   bool
+	}{
+		{"escalation, no policy", nil, esc, true},
+		{"escalation, policy without escalation entry", stage(exec, agenticv1alpha1.ApprovalModeManual), esc, true},
+		{"escalation, policy gates it Manual", stage(esc, agenticv1alpha1.ApprovalModeManual), esc, false},
+		{"escalation, policy Automatic", stage(esc, agenticv1alpha1.ApprovalModeAutomatic), esc, true},
+		{"execution, no policy stays Manual", nil, exec, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isStageApproved(nil, tt.policy, tt.step); got != tt.want {
+				t.Errorf("isStageApproved(%s) = %v, want %v", tt.step, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGetStageOverrideAgent_OmittedMeansNoOverride(t *testing.T) {
 	approval := &agenticv1alpha1.AgenticRunApproval{
 		Spec: agenticv1alpha1.AgenticRunApprovalSpec{
 			Stages: []agenticv1alpha1.ApprovalStage{
-				agenticv1alpha1.NewApprovalStage(agenticv1alpha1.ApprovalStageAnalysis, "", "", nil, 0),
-				agenticv1alpha1.NewApprovalStage(agenticv1alpha1.ApprovalStageExecution, "", "fast", nil, 0),
+				agenticv1alpha1.NewApprovalStage(agenticv1alpha1.ApprovalStageAnalysis, "", "", nil),
+				agenticv1alpha1.NewApprovalStage(agenticv1alpha1.ApprovalStageExecution, "", "fast", nil),
 			},
 		},
 	}
@@ -137,6 +171,26 @@ func TestGetStageOverrideAgent_OmittedMeansNoOverride(t *testing.T) {
 	}
 	if got := getStageOverrideAgent(approval, agenticv1alpha1.SandboxStepExecution); got != "fast" {
 		t.Errorf("execution agent override = %q, want fast", got)
+	}
+}
+
+func TestEffectiveStepAgentName_EscalationFallbackAndOverride(t *testing.T) {
+	analysis := agenticv1alpha1.AgenticRunStep{Agent: "analysis-agent"}
+	approval := &agenticv1alpha1.AgenticRunApproval{Spec: agenticv1alpha1.AgenticRunApprovalSpec{
+		Stages: []agenticv1alpha1.ApprovalStage{
+			agenticv1alpha1.NewApprovalStage(agenticv1alpha1.ApprovalStageAnalysis, "", "analysis-override", nil),
+		},
+	}}
+	if got := effectiveStepAgentName(approval, agenticv1alpha1.SandboxStepAnalysis, analysis); got != "analysis-override" {
+		t.Fatalf("analysis override = %q, want analysis-override", got)
+	}
+	if got := effectiveStepAgentName(approval, agenticv1alpha1.SandboxStepEscalation, analysis); got != "analysis-agent" {
+		t.Fatalf("escalation fallback = %q, want analysis-agent", got)
+	}
+	approval.Spec.Stages = append(approval.Spec.Stages,
+		agenticv1alpha1.NewApprovalStage(agenticv1alpha1.ApprovalStageEscalation, "", "escalation-agent", nil))
+	if got := getStageOverrideAgent(approval, agenticv1alpha1.SandboxStepEscalation); got != "escalation-agent" {
+		t.Fatalf("escalation override = %q, want escalation-agent", got)
 	}
 }
 

@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -26,42 +26,37 @@ var stepCondMu sync.Mutex
 // Pod event handler
 // ---------------------------------------------------------------------------
 
-// handlePodEvent is the Watches handler for sandbox pods. It evaluates
-// the step FSM on every pod event and acts on the outcome:
-//
-//	Completed → cleanup pod+CM, enqueue reconcile (phase routing picks up Result CR)
-//	Failed    → patch step condition, cleanup pod+CM
-//	Running   → patch step reason (WaitingForSandbox / Running)
+// handlePodEvent is the Watches handler for sandbox pods. It resolves
+// the owning AgenticRun using either labels (bare-pod) or the ownership
+// chain Pod → Sandbox → SandboxClaim (sandbox-claim mode).
 func (r *AgenticRunReconciler) handlePodEvent(ctx context.Context, obj client.Object) []ctrl.Request {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok {
 		return nil
 	}
 
-	// Not a sandbox pod — ignore.
-	step := pod.Labels[LabelStep]
-	runName := pod.Annotations[AnnotationRunName]
-	if pod.Labels[LabelRun] == "" || step == "" || runName == "" {
+	var step, runName string
+	if r.isSandboxClaimMode() {
+		step, runName, _ = resolveSandboxPodMetadata(ctx, r.Client, pod)
+	} else {
+		step, runName = resolveBarePodMetadata(pod)
+	}
+	if step == "" || runName == "" {
 		return nil
 	}
 
-	// Look up the owning AgenticRun. Gone → nothing to do.
 	var run agenticv1alpha1.AgenticRun
 	if err := r.Get(ctx, client.ObjectKey{Name: runName, Namespace: r.Namespace}, &run); err != nil {
 		return nil
 	}
 
-	// Resolve once: condition type, claim name, and enrich the logger.
 	condType := stepConditionType(step)
 	claimName := sandboxClaimName(&run, step)
-	runUID := string(run.UID)
 	ctx = logf.IntoContext(ctx, logf.FromContext(ctx).WithValues(
 		LogKeyName, pod.Name, LogKeyStep, step,
-		LogKeyClaim, claimName, "runUID", runUID, LogKeyCondition, condType,
+		LogKeyClaim, claimName, "runUID", string(run.UID), LogKeyCondition, condType,
 	))
 
-	// Pod still in progress — lightweight reason update, no FSM needed.
-	// Edge cases (node death, force delete) are caught by the timeout ticker.
 	if pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodPending || pod.Status.Phase == corev1.PodUnknown {
 		reason := ReasonRunning
 		if pod.Status.Phase != corev1.PodRunning {
@@ -71,19 +66,56 @@ func (r *AgenticRunReconciler) handlePodEvent(ctx context.Context, obj client.Ob
 		return nil
 	}
 
-	// Pod terminated — phase tells us the outcome.
-	if err := r.completeStep(ctx, &run, pod, step, condType, ""); err != nil {
+	if err := r.completeStep(ctx, &run, pod, step, condType, "", ""); err != nil {
 		return nil
 	}
 	return nil
 }
 
+// resolveBarePodMetadata reads step and run name from pod labels/annotations.
+func resolveBarePodMetadata(pod *corev1.Pod) (step, runName string) {
+	if pod.Labels[LabelRun] == "" {
+		return "", ""
+	}
+	return pod.Labels[LabelStep], pod.Annotations[AnnotationRunName]
+}
+
+// resolveSandboxPodMetadata follows the ownership chain:
+// Pod → Sandbox (ownerRef) → SandboxClaim (ownerRef) → our labels.
+func resolveSandboxPodMetadata(ctx context.Context, c client.Client, pod *corev1.Pod) (step, runName string, err error) {
+	for _, podRef := range pod.OwnerReferences {
+		if podRef.Kind != "Sandbox" {
+			continue
+		}
+		sb := &unstructured.Unstructured{}
+		sb.SetGroupVersionKind(smSandboxGVK)
+		if err := c.Get(ctx, client.ObjectKey{Name: podRef.Name, Namespace: pod.Namespace}, sb); err != nil {
+			return "", "", err
+		}
+		for _, sbRef := range sb.GetOwnerReferences() {
+			if sbRef.Kind != "SandboxClaim" {
+				continue
+			}
+			claim := &unstructured.Unstructured{}
+			claim.SetGroupVersionKind(smClaimGVK)
+			if err := c.Get(ctx, client.ObjectKey{Name: sbRef.Name, Namespace: pod.Namespace}, claim); err != nil {
+				return "", "", err
+			}
+			labels := claim.GetLabels()
+			annotations := claim.GetAnnotations()
+			return labels[LabelStep], annotations[AnnotationRunName], nil
+		}
+	}
+	return "", "", nil
+}
+
 // completeStep handles step completion: patches the step condition (and result ref
 // on success), emits audit events, and releases the sandbox. When timeoutMsg is
-// non-empty the pod phase is ignored and a timeout failure is recorded. Returns an
-// error if the status patch fails — the caller should bail so the timeout loop
+// non-empty the pod phase is ignored and a timeout failure is recorded. The timeoutReason
+// specifies which timeout condition occurred (e.g., ReasonSandboxStartupTimeout or ReasonSandboxTimeout).
+// Returns an error if the status patch fails — the caller should bail so the timeout loop
 // can retry.
-func (r *AgenticRunReconciler) completeStep(ctx context.Context, run *agenticv1alpha1.AgenticRun, pod *corev1.Pod, step, condType, timeoutMsg string) error {
+func (r *AgenticRunReconciler) completeStep(ctx context.Context, run *agenticv1alpha1.AgenticRun, pod *corev1.Pod, step, condType, timeoutMsg, timeoutReason string) error {
 	stepCondMu.Lock()
 	defer stepCondMu.Unlock()
 
@@ -97,7 +129,10 @@ func (r *AgenticRunReconciler) completeStep(ctx context.Context, run *agenticv1a
 
 	if timeoutMsg != "" {
 		log.Info("sandbox timeout", "message", timeoutMsg)
-		patchErr = r.patchStepCondition(ctx, run, condType, metav1.ConditionFalse, ReasonSandboxTimeout, timeoutMsg)
+		if timeoutReason == "" {
+			timeoutReason = ReasonSandboxTimeout
+		}
+		patchErr = r.patchStepCondition(ctx, run, condType, metav1.ConditionFalse, timeoutReason, timeoutMsg)
 	} else if pod.Status.Phase == corev1.PodSucceeded {
 		var reason string
 		resultCR, reason = validateResultCR(ctx, r.Client, run, step, r.Namespace)
@@ -111,12 +146,29 @@ func (r *AgenticRunReconciler) completeStep(ctx context.Context, run *agenticv1a
 				}
 			}
 			log.Info("sandbox step succeeded", "reason", stepReason)
-			patchErr = r.patchStepResult(ctx, run, step, condType, resultCR.GetName(),
+			patchErr = r.patchStepResult(ctx, run, step, condType, resultCR.GetName(), resultCR,
 				metav1.ConditionTrue, stepReason, stepMsg)
 		} else if resultCR != nil {
 			log.Info("agent reported failure", "reason", reason)
-			patchErr = r.patchStepResult(ctx, run, step, condType, resultCR.GetName(),
-				metav1.ConditionFalse, ReasonSandboxFailed, reason)
+			if reason == agenticv1alpha1.ResultReasonAgentTimeout && step == "verification" {
+				// A verification timeout is an agent outcome, not a sandbox
+				// infrastructure failure. Route it through the existing escalation
+				// path so a human can review the incomplete verification.
+				patchErr = r.patchVerificationFailedEscalating(ctx, run, resultCR.GetName(), resultCR, reason)
+			} else if reason == agenticv1alpha1.ResultReasonAgentTimeout {
+				patchErr = r.patchStepResult(ctx, run, step, condType, resultCR.GetName(), resultCR,
+					metav1.ConditionFalse, ReasonAgentTimeout, "Agent exceeded its configured execution budget")
+			} else if step == "verification" {
+				// OLS-3817: an objective verification failure (the agent ran and
+				// its VerificationResult reports the remediation did not work)
+				// escalates directly instead of retrying execution or terminating.
+				// Set Verified=False and Escalated=Unknown so DerivePhase routes to
+				// Escalating and the reconciler dispatches handleEscalation.
+				patchErr = r.patchVerificationFailedEscalating(ctx, run, resultCR.GetName(), resultCR, reason)
+			} else {
+				patchErr = r.patchStepResult(ctx, run, step, condType, resultCR.GetName(), resultCR,
+					metav1.ConditionFalse, ReasonSandboxFailed, reason)
+			}
 		} else {
 			log.Error(nil, "sandbox result validation failed", "reason", reason)
 			patchErr = r.patchStepCondition(ctx, run, condType, metav1.ConditionFalse, ReasonSandboxFailed, reason)
@@ -134,7 +186,13 @@ func (r *AgenticRunReconciler) completeStep(ctx context.Context, run *agenticv1a
 	if r.Audit != nil {
 		r.Audit.CompleteStep(run, step, resultCR)
 	}
-	r.releaseSandbox(ctx, run, step)
+	condition := meta.FindStatusCondition(run.Status.Conditions, condType)
+	preserve := preserveFailedSandbox(run) && condition != nil && condition.Status == metav1.ConditionFalse
+	if preserve {
+		log.Info("preserving failed sandbox for debugging", LogKeyStep, step)
+	} else {
+		r.releaseSandbox(ctx, run, step)
+	}
 	return nil
 }
 
@@ -169,8 +227,10 @@ func (r *AgenticRunReconciler) patchStepCondition(ctx context.Context, run *agen
 }
 
 // patchStepResult patches both the result ref and the step condition in a single
-// status update so the reconciler sees them atomically.
-func (r *AgenticRunReconciler) patchStepResult(ctx context.Context, run *agenticv1alpha1.AgenticRun, step, condType, crName string, status metav1.ConditionStatus, reason, message string) error {
+// status update so the reconciler sees them atomically. The resultCR is the
+// already-loaded Result CR from validateResultCR — its tokenUsage is aggregated
+// into the run's cumulative total without a redundant API server fetch.
+func (r *AgenticRunReconciler) patchStepResult(ctx context.Context, run *agenticv1alpha1.AgenticRun, step, condType, crName string, resultCR client.Object, status metav1.ConditionStatus, reason, message string) error {
 	if condType == "" {
 		return nil
 	}
@@ -180,6 +240,7 @@ func (r *AgenticRunReconciler) patchStepResult(ctx context.Context, run *agentic
 		outcome = agenticv1alpha1.ActionOutcomeFailed
 	}
 	appendResultRef(run, step, crName, outcome)
+	aggregateTokenUsage(run, resultCR)
 	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
 		Type:               condType,
 		Status:             status,
@@ -192,6 +253,75 @@ func (r *AgenticRunReconciler) patchStepResult(ctx context.Context, run *agentic
 		return err
 	}
 	return nil
+}
+
+// patchVerificationFailedEscalating records an objective verification failure and
+// routes the run onto the escalation path (OLS-3817). It appends the verification
+// result ref and, in a single status patch, sets Verified=False/VerificationFailed
+// plus Escalated=Unknown/VerificationFailed so DerivePhase yields Escalating.
+func (r *AgenticRunReconciler) patchVerificationFailedEscalating(ctx context.Context, run *agenticv1alpha1.AgenticRun, crName string, resultCR client.Object, reason string) error {
+	base := run.DeepCopy()
+	appendResultRef(run, "verification", crName, agenticv1alpha1.ActionOutcomeFailed)
+	aggregateTokenUsage(run, resultCR)
+	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+		Type:               agenticv1alpha1.AgenticRunConditionVerified,
+		Status:             metav1.ConditionFalse,
+		Reason:             agenticv1alpha1.ReasonVerificationFailed,
+		Message:            fmt.Sprintf("Verification failed: %s", reason),
+		ObservedGeneration: run.Generation,
+	})
+	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+		Type:               agenticv1alpha1.AgenticRunConditionEscalated,
+		Status:             metav1.ConditionUnknown,
+		Reason:             agenticv1alpha1.ReasonVerificationFailed,
+		Message:            "Verification failed, escalating",
+		ObservedGeneration: run.Generation,
+	})
+	if err := r.statusPatch(ctx, run, base); err != nil {
+		logf.FromContext(ctx).Error(err, "pod handler: failed to patch verification-failed escalation")
+		return err
+	}
+	return nil
+}
+
+// aggregateTokenUsage extracts tokenUsage from the already-loaded Result CR
+// and adds it to the run's cumulative total. If the Result CR has no
+// tokenUsage (IsZero) the run is left unchanged. The run's TokenUsage is
+// initialised on first present contribution.
+func aggregateTokenUsage(run *agenticv1alpha1.AgenticRun, resultCR client.Object) {
+	tu := extractTokenUsage(resultCR)
+	if tu.IsZero() {
+		return
+	}
+
+	if run.Status.TokenUsage.IsZero() {
+		run.Status.TokenUsage = agenticv1alpha1.TokenUsage{
+			InputTokens:  new(int64),
+			OutputTokens: new(int64),
+		}
+	}
+	if tu.InputTokens != nil {
+		*run.Status.TokenUsage.InputTokens += *tu.InputTokens
+	}
+	if tu.OutputTokens != nil {
+		*run.Status.TokenUsage.OutputTokens += *tu.OutputTokens
+	}
+}
+
+// extractTokenUsage returns the tokenUsage from a Result CR via type switch.
+func extractTokenUsage(obj client.Object) agenticv1alpha1.TokenUsage {
+	switch cr := obj.(type) {
+	case *agenticv1alpha1.AnalysisResult:
+		return cr.Status.TokenUsage
+	case *agenticv1alpha1.ExecutionResult:
+		return cr.Status.TokenUsage
+	case *agenticv1alpha1.VerificationResult:
+		return cr.Status.TokenUsage
+	case *agenticv1alpha1.EscalationResult:
+		return cr.Status.TokenUsage
+	default:
+		return agenticv1alpha1.TokenUsage{}
+	}
 }
 
 // appendResultRef appends a StepResultRef to the run's status for the given step.
@@ -211,72 +341,7 @@ func appendResultRef(run *agenticv1alpha1.AgenticRun, step, name string, outcome
 
 func (r *AgenticRunReconciler) releaseSandbox(ctx context.Context, run *agenticv1alpha1.AgenticRun, step string) {
 	if err := r.Agent.ReleaseSandbox(ctx, run, step); err != nil {
-		logf.FromContext(ctx).Error(err, "pod handler: failed to release sandbox", LogKeyStep, step)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Timeout ticker — background goroutine for time-driven timeout checks
-// ---------------------------------------------------------------------------
-
-const sandboxTimeoutCheckInterval = 1 * time.Minute
-
-// runTimeoutLoop runs handleTimeEvent in a loop.
-// Stopped when ctx is cancelled (manager shutdown).
-func (r *AgenticRunReconciler) runTimeoutLoop(ctx context.Context) error {
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(sandboxTimeoutCheckInterval):
-			r.handleTimeEvent(ctx)
-		}
-	}
-}
-
-// handleTimeEvent checks all sandbox pods for start/overall timeouts.
-func (r *AgenticRunReconciler) handleTimeEvent(ctx context.Context) {
-	log := logf.FromContext(ctx).WithName("sandbox-timeout")
-	var pods corev1.PodList
-	if err := r.List(ctx, &pods, client.InNamespace(r.Namespace), client.HasLabels{LabelRun, LabelStep}); err != nil {
-		log.Error(err, "failed to list sandbox pods")
-		return
-	}
-
-	now := time.Now()
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		step := pod.Labels[LabelStep]
-		runName := pod.Annotations[AnnotationRunName]
-		condType := stepConditionType(step)
-		if runName == "" {
-			continue
-		}
-
-		var run agenticv1alpha1.AgenticRun
-		if err := r.Get(ctx, client.ObjectKey{Name: runName, Namespace: r.Namespace}, &run); err != nil {
-			continue
-		}
-
-		// Retry: pod already terminal but step condition still pending (patch failed earlier).
-		phase := pod.Status.Phase
-		if (phase == corev1.PodSucceeded || phase == corev1.PodFailed) && isStepInProgress(&run, condType) {
-			log.Info("retrying completion for terminal pod", LogKeyName, pod.Name, LogKeyStep, step)
-			_ = r.completeStep(ctx, &run, pod, step, condType, "")
-			continue
-		}
-
-		created := pod.CreationTimestamp.Time
-		var message string
-		if startTimedOut(phase, created, now, podStartTimeout) {
-			message = fmt.Sprintf("sandbox pod did not start within %s", podStartTimeout)
-		} else if overallTimedOut(created, now, stepTimeout(step)) {
-			message = fmt.Sprintf("sandbox exceeded timeout %s", stepTimeout(step))
-		} else {
-			continue
-		}
-
-		_ = r.completeStep(ctx, &run, pod, step, condType, message)
+		logf.FromContext(ctx).Error(err, "failed to release sandbox", LogKeyStep, step)
 	}
 }
 
@@ -337,6 +402,11 @@ func validateResultCR(ctx context.Context, c client.Client, run *agenticv1alpha1
 	cond := meta.FindStatusCondition(conditions, agenticv1alpha1.ResultConditionCompleted)
 	if cond == nil || cond.Status != metav1.ConditionTrue {
 		return nil, "result CR missing Completed condition"
+	}
+	// Cooperative timeout is a distinct agent outcome. Check the Completed
+	// condition before failureReason because the sandbox includes both fields.
+	if cond.Reason == agenticv1alpha1.ResultReasonAgentTimeout {
+		return obj, agenticv1alpha1.ResultReasonAgentTimeout
 	}
 	if failureReason != "" {
 		return obj, failureReason
@@ -419,19 +489,6 @@ func podFailMessage(pod *corev1.Pod) string {
 		return fmt.Sprintf("sandbox pod failed (exit %d)", *exitCode)
 	}
 	return "sandbox pod failed"
-}
-
-// startTimedOut returns true if the pod has not reached Running within the start deadline.
-func startTimedOut(phase corev1.PodPhase, created, now time.Time, timeout time.Duration) bool {
-	if phase == corev1.PodRunning || phase == corev1.PodSucceeded || phase == corev1.PodFailed {
-		return false
-	}
-	return now.Sub(created) > timeout
-}
-
-// overallTimedOut returns true if the pod has exceeded the step deadline.
-func overallTimedOut(created, now time.Time, timeout time.Duration) bool {
-	return now.Sub(created) > timeout
 }
 
 // podTerminatedInfo returns the first terminated container's message and exit code.

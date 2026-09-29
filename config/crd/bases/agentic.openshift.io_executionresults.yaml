@@ -18,9 +18,6 @@ spec:
     - jsonPath: .spec.agenticRunName
       name: AgenticRun
       type: string
-    - jsonPath: .spec.retryIndex
-      name: Retry
-      type: integer
     - jsonPath: .status.conditions[?(@.type=="Completed")].reason
       name: Outcome
       type: string
@@ -61,17 +58,8 @@ spec:
                 maxLength: 253
                 minLength: 1
                 type: string
-              retryIndex:
-                description: |-
-                  retryIndex is the 0-based retry index within the current analysis.
-                  First execution has retryIndex 0, first retry has retryIndex 1, etc.
-                format: int32
-                maximum: 2
-                minimum: 0
-                type: integer
             required:
             - agenticRunName
-            - retryIndex
             type: object
             x-kubernetes-validations:
             - message: spec is immutable
@@ -227,6 +215,27 @@ spec:
                 required:
                 - claimName
                 - namespace
+                type: object
+              tokenUsage:
+                description: tokenUsage records the number of LLM tokens consumed
+                  during this step.
+                minProperties: 1
+                properties:
+                  inputTokens:
+                    description: inputTokens is the number of input (prompt) tokens
+                      consumed.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  outputTokens:
+                    description: outputTokens is the number of output (completion)
+                      tokens consumed.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                required:
+                - inputTokens
+                - outputTokens
                 type: object
             type: object
         required:

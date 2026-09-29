@@ -9,6 +9,7 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -44,7 +45,11 @@ const (
 // +kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch
 
 var smClaimGVK = schema.GroupVersionKind{
-	Group: "extensions.agents.x-k8s.io", Version: "v1alpha1", Kind: "SandboxClaim",
+	Group: "extensions.agents.x-k8s.io", Version: "v1beta1", Kind: "SandboxClaim",
+}
+
+var smSandboxGVK = schema.GroupVersionKind{
+	Group: "agents.x-k8s.io", Version: "v1beta1", Kind: "Sandbox",
 }
 
 // SandboxManager manages sandbox lifecycle: create, wait-ready, release.
@@ -82,7 +87,6 @@ func (m *SandboxManager) Create(
 	llm *agenticv1alpha1.LLMProvider,
 	tools *agenticv1alpha1.ToolsSpec,
 	deadline time.Duration,
-	query string,
 	agentCtx *agentContext,
 ) (name string, retErr error) {
 	if m.audit != nil {
@@ -104,54 +108,119 @@ func (m *SandboxManager) Create(
 
 	span := trace.SpanFromContext(ctx)
 
-	serviceAccount := sandboxSAName(run, step)
-	if err := m.ensureSA(ctx, run, serviceAccount, step); err != nil {
+	// Resolve spoke access once for the entire Create flow.
+	// nil when targetCluster is empty (hub path — unchanged behavior).
+	spoke, err := spokeAccessForRun(ctx, m.client, run, m.namespace)
+	if err != nil {
 		return "", err
+	}
+
+	serviceAccount := sandboxSAName(run, step)
+
+	// Register cleanup so that any failure after SA creation cleans up
+	// spoke resources, RBAC, and the SA itself.
+	var createErr error
+	defer func() {
+		if createErr != nil {
+			cleanupCtx, cancel := cleanupContext(ctx)
+			defer cancel()
+			m.cleanupOnCreateFailure(cleanupCtx, run, step, serviceAccount, spoke)
+		}
+	}()
+
+	token, err := m.ensureSA(ctx, run, serviceAccount, step, spoke)
+	if err != nil {
+		createErr = err
+		return "", err
+	}
+
+	// For spoke runs, the sandbox pod uses the default SA with automount
+	// enabled — the automounted token provides hub API access for writing
+	// Result CRs. Spoke cluster access comes via a mounted kubeconfig
+	// (KUBECONFIG env var). The two credential paths don't conflict.
+	podServiceAccount := serviceAccount
+	if spoke != nil {
+		podServiceAccount = "default"
+	}
+
+	if spoke != nil {
+		if err := m.ensureSandboxKubeconfig(ctx, run, step, spoke, token); err != nil {
+			createErr = err
+			return "", err
+		}
 	}
 	span.AddEvent("sandbox.sa.created")
 
 	if step == "execution" && agentCtx != nil && agentCtx.ApprovedOption != nil {
 		rbac := &agentCtx.ApprovedOption.RBAC
 		if len(rbac.NamespaceScoped) > 0 || len(rbac.ClusterScoped) > 0 {
+			// Execution RBAC targets spoke when targetCluster is set.
+			rbacClient := m.client
+			rbacNS := m.namespace
+			var extraLabels map[string]string
+			if spoke != nil {
+				rbacClient = spoke.Client
+				rbacNS = spoke.Namespace
+				extraLabels = spokeExtraLabels(run.Name, run.Spec.TargetCluster)
+			}
 			base := run.DeepCopy()
-			if err := ensureExecutionRBAC(ctx, m.client, run, rbac, m.namespace); err != nil {
+			if err := ensureExecutionRBAC(ctx, rbacClient, run, rbac, rbacNS, extraLabels); err != nil {
+				createErr = err
 				return "", err
 			}
+			// Annotation is persisted on hub (run lives on hub).
 			if err := m.client.Patch(ctx, run, client.MergeFrom(base)); err != nil {
-				return "", fmt.Errorf("persist RBAC annotation: %w", err)
+				createErr = fmt.Errorf("persist RBAC annotation: %w", err)
+				return "", createErr
 			}
 		}
 	}
 
 	schema := outputSchemaForStep(step, run)
-	inputCM, err := buildInputConfigMap(m.namespace, run, step, query, schema, agentCtx)
+	inputCM, err := buildInputConfigMap(m.namespace, run, step, agent, schema, agentCtx)
 	if err != nil {
+		createErr = err
 		return "", err
 	}
 	if err := m.createInputConfigMap(ctx, inputCM); err != nil {
+		createErr = err
 		return "", err
 	}
 	span.AddEvent("sandbox.configmap.created")
 
-	if err := ensureResultRBAC(ctx, m.client, run, step, serviceAccount, m.namespace); err != nil {
+	// Result RBAC is always on the hub — the sandbox pod writes its Result CR
+	// to the hub API server. Bind to podServiceAccount (= "default" for spoke,
+	// = per-step SA for hub) so the pod's actual hub identity has permission.
+	if err := ensureResultRBAC(ctx, m.client, run, step, podServiceAccount, m.namespace); err != nil {
+		createErr = err
 		return "", err
 	}
 	span.AddEvent("sandbox.rbac.created")
+
+	timeoutSecs := resolveTimeout(agent, step)
+	maxTurns := resolveMaxTurns(agent)
 
 	podSpec, err := m.builder.Build(
 		cfg.Sandbox.PodSpec,
 		agent,
 		llm,
 		tools,
-		&cfg.OTEL,
+		cfg,
 		step,
 		string(run.UID),
-		serviceAccount,
+		podServiceAccount,
 		inputCM.Name,
 		traceparentFromContext(ctx),
+		timeoutSecs,
+		maxTurns,
 	)
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", errBuildPodSpec, err)
+		createErr = fmt.Errorf("%s: %w", errBuildPodSpec, err)
+		return "", createErr
+	}
+
+	if spoke != nil {
+		mountSpokeKubeconfig(podSpec, sandboxKubeconfigSecretName(string(run.UID), step))
 	}
 
 	if deadline > 0 {
@@ -164,6 +233,7 @@ func (m *SandboxManager) Create(
 	if cfg.Sandbox.Mode == sandboxModeSandboxClaim {
 		claimName, claimUID, err := m.createSandboxClaim(ctx, run, name, step, podSpec)
 		if err != nil {
+			createErr = err
 			return "", err
 		}
 		ownerRef = metav1.OwnerReference{
@@ -176,6 +246,7 @@ func (m *SandboxManager) Create(
 	} else {
 		podName, podUID, err := m.createBarePod(ctx, run, name, step, podSpec)
 		if err != nil {
+			createErr = err
 			return "", err
 		}
 		ownerRef = metav1.OwnerReference{
@@ -189,21 +260,67 @@ func (m *SandboxManager) Create(
 
 	span.AddEvent("sandbox.pod.created")
 
-	if err := m.setInputConfigMapOwner(ctx, string(run.UID), ownerRef); err != nil {
-		return "", err
+	// Post-workload owner-ref updates. These do NOT set createErr because
+	// the workload is already running — cleanupOnCreateFailure must not
+	// delete dependencies from under it. Return name (not "") so the
+	// caller can persist it and ReleaseSandboxes can find the workload.
+	if err := m.setInputConfigMapOwner(ctx, inputConfigMapName(step, string(run.UID)), ownerRef); err != nil {
+		return name, err
 	}
 	if err := setResultRBACOwner(ctx, m.client, string(run.UID), step, ownerRef, m.namespace); err != nil {
-		return "", err
+		return name, err
 	}
-	if err := m.setSAOwner(ctx, serviceAccount, ownerRef); err != nil {
-		return "", err
+	// Skip SA owner ref for spoke SAs — cross-cluster owner refs don't work.
+	// Spoke SA cleanup is explicit via Release/finalizer path.
+	if spoke == nil {
+		if err := m.setSAOwner(ctx, serviceAccount, ownerRef); err != nil {
+			return name, err
+		}
 	}
 	return name, nil
 }
 
-// ensureSA creates a per-step ServiceAccount and adds it to the shared reader
-// ClusterRoleBindings. Idempotent.
-func (m *SandboxManager) ensureSA(ctx context.Context, run *agenticv1alpha1.AgenticRun, saName, step string) error {
+// ensureSA creates a per-step ServiceAccount and adds it to reader
+// ClusterRoleBindings. For spoke runs, creates the SA on the spoke cluster
+// with spoke labels, creates per-run CRBs, and requests a 24h bound token
+// via TokenRequest. For hub runs, adds the SA to the shared reader CRBs.
+// Idempotent.
+//
+// Returns the spoke token (non-empty for spoke, empty for hub).
+func (m *SandboxManager) ensureSA(ctx context.Context, run *agenticv1alpha1.AgenticRun, saName, step string, spoke *SpokeAccess) (string, error) {
+	if spoke != nil {
+		// spoke path: SA on spoke with spoke-specific labels
+		sa := &corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      saName,
+				Namespace: spoke.Namespace,
+				Labels:    spokeLabels(string(run.UID), run.Name, run.Spec.TargetCluster, step+"-sa"),
+			},
+		}
+		created := false
+		if err := spoke.Client.Create(ctx, sa); err != nil {
+			if !apierrors.IsAlreadyExists(err) {
+				return "", fmt.Errorf("%s %s: %w", ErrCreateSandboxSA, saName, err)
+			}
+		} else {
+			created = true
+		}
+		if err := addReaderSubjectOnSpoke(ctx, spoke.Client, string(run.UID), step, saName, spoke.Namespace, spokeExtraLabels(run.Name, run.Spec.TargetCluster)); err != nil {
+			if created {
+				_ = spoke.Client.Delete(ctx, sa)
+			}
+			return "", err
+		}
+		// Request a 24h bound token for the spoke SA. This token is embedded
+		// in the sandbox kubeconfig Secret so the pod can target the spoke.
+		token, err := requestSpokeToken(ctx, spoke.Config, saName, spoke.Namespace)
+		if err != nil {
+			return "", err
+		}
+		return token, nil
+	}
+
+	// hub path: unchanged
 	sa := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      saName,
@@ -211,10 +328,94 @@ func (m *SandboxManager) ensureSA(ctx context.Context, run *agenticv1alpha1.Agen
 			Labels:    rbacLabels(string(run.UID), step+"-sa"),
 		},
 	}
-	if err := m.client.Create(ctx, sa); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("%s %s: %w", ErrCreateSandboxSA, saName, err)
+	created := false
+	if err := m.client.Create(ctx, sa); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return "", fmt.Errorf("%s %s: %w", ErrCreateSandboxSA, saName, err)
+		}
+	} else {
+		created = true
 	}
-	return addReaderSubject(ctx, m.client, saName, m.namespace)
+	if err := addReaderSubject(ctx, m.client, string(run.UID), step, saName, m.namespace); err != nil {
+		if created {
+			_ = m.client.Delete(ctx, sa)
+		}
+		return "", err
+	}
+	return "", nil
+}
+
+// ensureSandboxKubeconfig creates or refreshes the hub Secret containing the
+// spoke kubeconfig (server URL, CA, proxy-url, ephemeral token). On retry
+// (AlreadyExists), the Secret data is refreshed so the pod gets the freshly
+// requested token.
+func (m *SandboxManager) ensureSandboxKubeconfig(ctx context.Context, run *agenticv1alpha1.AgenticRun, step string, spoke *SpokeAccess, token string) error {
+	kubeconfigData, err := buildSandboxKubeconfig(spoke, token)
+	if err != nil {
+		return err
+	}
+	kcSecretName := sandboxKubeconfigSecretName(string(run.UID), step)
+	kcSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      kcSecretName,
+			Namespace: m.namespace,
+			Labels:    rbacLabels(string(run.UID), "sandbox-kubeconfig"),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: agenticv1alpha1.GroupVersion.String(),
+				Kind:       "AgenticRun",
+				Name:       run.Name,
+				UID:        run.UID,
+			}},
+		},
+		Data: map[string][]byte{
+			spokeKubeconfigFileName: kubeconfigData,
+		},
+	}
+	if err := m.client.Create(ctx, kcSecret); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("create sandbox kubeconfig Secret %s: %w", kcSecretName, err)
+		}
+		// On retry, refresh the Secret data so the pod mounts the
+		// freshly requested token instead of a potentially expired one.
+		existing := &corev1.Secret{}
+		if err := m.client.Get(ctx, client.ObjectKey{Name: kcSecretName, Namespace: m.namespace}, existing); err != nil {
+			return fmt.Errorf("get existing sandbox kubeconfig Secret %s: %w", kcSecretName, err)
+		}
+		// Defense-in-depth: verify the existing Secret belongs to this run.
+		if existing.Labels[LabelRun] != string(run.UID) {
+			return fmt.Errorf("sandbox kubeconfig Secret %s belongs to a different run (label %s != %s)", kcSecretName, existing.Labels[LabelRun], string(run.UID))
+		}
+		existing.Data = kcSecret.Data
+		if err := m.client.Update(ctx, existing); err != nil {
+			return fmt.Errorf("update sandbox kubeconfig Secret %s: %w", kcSecretName, err)
+		}
+	}
+	return nil
+}
+
+// mountSpokeKubeconfig adds the spoke kubeconfig Secret as a volume and sets
+// the KUBECONFIG env var on all containers in the pod spec.
+func mountSpokeKubeconfig(podSpec *corev1.PodSpec, secretName string) {
+	kcMountPath := spokeKubeconfigMountPath + "/" + spokeKubeconfigFileName
+	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+		Name: spokeKubeconfigVolume,
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: secretName,
+			},
+		},
+	})
+	for i := range podSpec.Containers {
+		podSpec.Containers[i].VolumeMounts = append(podSpec.Containers[i].VolumeMounts, corev1.VolumeMount{
+			Name:      spokeKubeconfigVolume,
+			MountPath: spokeKubeconfigMountPath,
+			ReadOnly:  true,
+		})
+		podSpec.Containers[i].Env = append(podSpec.Containers[i].Env, corev1.EnvVar{
+			Name:  "KUBECONFIG",
+			Value: kcMountPath,
+		})
+	}
 }
 
 // setSAOwner sets the pod/claim as owner on the per-run ServiceAccount
@@ -230,6 +431,51 @@ func (m *SandboxManager) setSAOwner(ctx context.Context, saName string, owner me
 		return fmt.Errorf("set owner on sandbox SA %s: %w", saName, err)
 	}
 	return nil
+}
+
+// cleanupOnCreateFailure removes resources created during Create() before the
+// pod existed (ConfigMap, result RBAC, SA). Best-effort: logs errors but does
+// not return them — the original creation error takes priority.
+func (m *SandboxManager) cleanupOnCreateFailure(ctx context.Context, run *agenticv1alpha1.AgenticRun, step, serviceAccount string, spoke *SpokeAccess) {
+	log := logf.FromContext(ctx)
+	cmName := inputConfigMapName(step, string(run.UID))
+	cm := &corev1.ConfigMap{}
+	cm.Name = cmName
+	cm.Namespace = m.namespace
+	if err := m.client.Delete(ctx, cm); err != nil && !apierrors.IsNotFound(err) {
+		log.Error(err, "cleanup: failed to delete input ConfigMap", LogKeyName, cmName)
+	}
+	roleName := resultRoleName(string(run.UID), step)
+	role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: roleName, Namespace: m.namespace}}
+	if err := m.client.Delete(ctx, role); err != nil && !apierrors.IsNotFound(err) {
+		log.Error(err, "cleanup: failed to delete result Role", LogKeyName, roleName)
+	}
+	rb := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: roleName, Namespace: m.namespace}}
+	if err := m.client.Delete(ctx, rb); err != nil && !apierrors.IsNotFound(err) {
+		log.Error(err, "cleanup: failed to delete result RoleBinding", LogKeyName, roleName)
+	}
+	// Spoke kubeconfig Secret cleanup (hub-side, alongside ConfigMap + result RBAC).
+	// Check LabelRun before deleting — a colliding name from a different run
+	// must not be removed (see ownership guard in Create).
+	if spoke != nil {
+		kcName := sandboxKubeconfigSecretName(string(run.UID), step)
+		existing := &corev1.Secret{}
+		if err := m.client.Get(ctx, client.ObjectKey{Name: kcName, Namespace: m.namespace}, existing); err != nil {
+			if !apierrors.IsNotFound(err) {
+				log.Error(err, "cleanup: failed to get sandbox kubeconfig Secret", LogKeyName, kcName)
+			}
+		} else if existing.Labels[LabelRun] == string(run.UID) {
+			if err := m.client.Delete(ctx, existing); err != nil && !apierrors.IsNotFound(err) {
+				log.Error(err, "cleanup: failed to delete sandbox kubeconfig Secret", LogKeyName, kcName)
+			}
+		}
+	}
+	// SA + reader CRBs + execution RBAC cleanup via shared function.
+	if serviceAccount != "" {
+		if err := cleanupStepRBAC(ctx, spoke, m.client, m.namespace, run, step); err != nil {
+			log.Error(err, "cleanup: step RBAC cleanup", LogKeyName, serviceAccount)
+		}
+	}
 }
 
 // setInputConfigMapOwner replaces the owner refs on the input ConfigMap with
@@ -349,7 +595,7 @@ func (m *SandboxManager) createSandboxClaim(
 
 	template := &unstructured.Unstructured{
 		Object: map[string]any{
-			"apiVersion": "extensions.agents.x-k8s.io/v1alpha1",
+			"apiVersion": "extensions.agents.x-k8s.io/v1beta1",
 			"kind":       "SandboxTemplate",
 			"metadata": map[string]any{
 				"name":      name,
@@ -358,21 +604,43 @@ func (m *SandboxManager) createSandboxClaim(
 					LabelRun:  string(run.UID),
 					LabelStep: step,
 				},
-				"annotations": map[string]any{
-					AnnotationRunName: run.Name,
-				},
 				"ownerReferences": []any{ownerRef},
 			},
 			"spec": map[string]any{
+				"networkPolicyManagement": "Unmanaged",
 				"podTemplate": map[string]any{
 					"spec": podSpecMap,
 				},
 			},
 		},
 	}
-
 	if err := m.client.Create(ctx, template); err != nil && !apierrors.IsAlreadyExists(err) {
 		return "", "", fmt.Errorf("%s: %w", errEnsureAgentTemplate, err)
+	}
+
+	pool := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+			"kind":       "SandboxWarmPool",
+			"metadata": map[string]any{
+				"name":      name,
+				"namespace": m.namespace,
+				"labels": map[string]any{
+					LabelRun:  string(run.UID),
+					LabelStep: step,
+				},
+				"ownerReferences": []any{ownerRef},
+			},
+			"spec": map[string]any{
+				"replicas": int64(0),
+				"sandboxTemplateRef": map[string]any{
+					"name": name,
+				},
+			},
+		},
+	}
+	if err := m.client.Create(ctx, pool); err != nil && !apierrors.IsAlreadyExists(err) {
+		return "", "", fmt.Errorf("create SandboxWarmPool for %s: %w", step, err)
 	}
 
 	claim := &unstructured.Unstructured{
@@ -392,7 +660,7 @@ func (m *SandboxManager) createSandboxClaim(
 				"ownerReferences": []any{ownerRef},
 			},
 			"spec": map[string]any{
-				"sandboxTemplateRef": map[string]any{
+				"warmPoolRef": map[string]any{
 					"name": name,
 				},
 				"lifecycle": map[string]any{
@@ -436,7 +704,10 @@ func podSpecToUnstructured(podSpec *corev1.PodSpec) (map[string]any, error) {
 // automatically via owner references. Cross-namespace execution RBAC (Roles,
 // ClusterRoles) and reader subject bindings are cleaned up explicitly.
 // Idempotent.
-func (m *SandboxManager) Release(ctx context.Context, run *agenticv1alpha1.AgenticRun, step string) error {
+// Release ends the audit span and deletes the sandbox resource. spoke is
+// pre-resolved by the caller (ReleaseSandbox / ReleaseSandboxes) so that
+// bulk teardown reads the kubeconfig Secret only once.
+func (m *SandboxManager) Release(ctx context.Context, run *agenticv1alpha1.AgenticRun, step string, spoke *SpokeAccess) error {
 	if m.audit != nil {
 		m.audit.CompleteStep(run, step, nil)
 	}
@@ -456,16 +727,24 @@ func (m *SandboxManager) Release(ctx context.Context, run *agenticv1alpha1.Agent
 		}
 	}
 
-	saName := sandboxSAName(run, step)
-	if err := removeReaderSubject(ctx, m.client, saName, m.namespace); err != nil && firstErr == nil {
+	// RBAC + SA cleanup via shared function (works for both spoke and hub).
+	if err := cleanupStepRBAC(ctx, spoke, m.client, m.namespace, run, step); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
-	if step == "execution" {
-		if err := cleanupExecutionRBAC(ctx, m.client, run); err != nil && firstErr == nil {
+	// Delete the sandbox kubeconfig Secret eagerly. Owner-ref GC would
+	// clean it up when the AgenticRun is deleted, but the Secret contains
+	// a 24h spoke token — no reason to keep it after the step completes.
+	// Use TargetCluster (not spoke != nil) so the Secret is deleted even
+	// when the spoke is unreachable — the Secret is a hub resource.
+	if run.Spec.TargetCluster != "" {
+		kcName := sandboxKubeconfigSecretName(string(run.UID), step)
+		kcSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: kcName, Namespace: m.namespace}}
+		if err := m.client.Delete(ctx, kcSecret); err != nil && !apierrors.IsNotFound(err) && firstErr == nil {
 			firstErr = err
 		}
 	}
+
 	return firstErr
 }
 
@@ -502,9 +781,20 @@ func (m *SandboxManager) releaseSandboxClaim(ctx context.Context, claimName stri
 		return fmt.Errorf("%s %q: %w", errDeleteSandboxClaim, claimName, err)
 	}
 
+	pool := &unstructured.Unstructured{}
+	pool.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: "extensions.agents.x-k8s.io", Version: "v1beta1", Kind: "SandboxWarmPool",
+	})
+	pool.SetName(claimName)
+	pool.SetNamespace(m.namespace)
+
+	if err := m.client.Delete(ctx, pool); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete SandboxWarmPool %q: %w", claimName, err)
+	}
+
 	tmpl := &unstructured.Unstructured{}
 	tmpl.SetGroupVersionKind(schema.GroupVersionKind{
-		Group: "extensions.agents.x-k8s.io", Version: "v1alpha1", Kind: "SandboxTemplate",
+		Group: "extensions.agents.x-k8s.io", Version: "v1beta1", Kind: "SandboxTemplate",
 	})
 	tmpl.SetName(claimName)
 	tmpl.SetNamespace(m.namespace)
@@ -513,7 +803,7 @@ func (m *SandboxManager) releaseSandboxClaim(ctx context.Context, claimName stri
 		return fmt.Errorf("delete SandboxTemplate %q: %w", claimName, err)
 	}
 
-	log.Info("Released SandboxClaim and SandboxTemplate", LogKeyClaim, claimName)
+	log.Info("Released SandboxClaim, SandboxWarmPool, and SandboxTemplate", LogKeyClaim, claimName)
 	return nil
 }
 

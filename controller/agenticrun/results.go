@@ -3,6 +3,8 @@ package agenticrun
 import (
 	"context"
 	"fmt"
+	"strings"
+	"unicode/utf8"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,6 +20,20 @@ const (
 	ErrCreateResultCR             = "create"
 	ErrPatchResultStatus          = "patch"
 )
+
+const maxResultFailureReason = 8192
+
+func boundedFailureReason(reason string) string {
+	if len(reason) <= maxResultFailureReason {
+		return reason
+	}
+
+	limit := maxResultFailureReason - len("...")
+	for limit > 0 && !utf8.ValidString(reason[:limit]) {
+		limit--
+	}
+	return strings.TrimSpace(reason[:limit]) + "..."
+}
 
 func resultCRName(agenticRunName, step string, index int) string {
 	return truncateK8sName(fmt.Sprintf("%s-%s-%d", agenticRunName, step, index))
@@ -38,13 +54,6 @@ func resultLabels(runUID, step string) map[string]string {
 		LabelRun:  runUID,
 		LabelStep: step,
 	}
-}
-
-func executionRetryIndex(run *agenticv1alpha1.AgenticRun) int32 {
-	if run.Status.Steps.Execution.RetryCount != nil {
-		return *run.Status.Steps.Execution.RetryCount
-	}
-	return 0
 }
 
 func resultConditions(startTime *metav1.Time, completionTime metav1.Time, outcome agenticv1alpha1.ActionOutcome) []metav1.Condition {
@@ -104,7 +113,7 @@ func (r *AgenticRunReconciler) createAnalysisResult(
 		Status: agenticv1alpha1.AnalysisResultStatus{
 			Conditions:    resultConditions(startTime, completedAt, outcome),
 			Sandbox:       sandbox,
-			FailureReason: failureReason,
+			FailureReason: boundedFailureReason(failureReason),
 		},
 	}
 
@@ -155,12 +164,11 @@ func (r *AgenticRunReconciler) createExecutionResult(
 		},
 		Spec: agenticv1alpha1.ExecutionResultSpec{
 			AgenticRunName: run.Name,
-			RetryIndex:     ptr.To(executionRetryIndex(run)),
 		},
 		Status: agenticv1alpha1.ExecutionResultStatus{
 			Conditions:    resultConditions(startTime, completedAt, outcome),
 			Sandbox:       sandbox,
-			FailureReason: failureReason,
+			FailureReason: boundedFailureReason(failureReason),
 		},
 	}
 
@@ -207,12 +215,11 @@ func (r *AgenticRunReconciler) createVerificationResult(
 		},
 		Spec: agenticv1alpha1.VerificationResultSpec{
 			AgenticRunName: run.Name,
-			RetryIndex:     ptr.To(executionRetryIndex(run)),
 		},
 		Status: agenticv1alpha1.VerificationResultStatus{
 			Conditions:    resultConditions(startTime, completedAt, outcome),
 			Sandbox:       sandbox,
-			FailureReason: failureReason,
+			FailureReason: boundedFailureReason(failureReason),
 		},
 	}
 
@@ -264,7 +271,7 @@ func (r *AgenticRunReconciler) createEscalationResult(
 		Status: agenticv1alpha1.EscalationResultStatus{
 			Conditions:    resultConditions(startTime, completedAt, outcome),
 			Sandbox:       sandbox,
-			FailureReason: failureReason,
+			FailureReason: boundedFailureReason(failureReason),
 		},
 	}
 
@@ -298,12 +305,14 @@ func copyResultStatus(dst, src client.Object) {
 			d.Status.Options = s.Status.Options
 			d.Status.ActionRequired = s.Status.ActionRequired
 			d.Status.Diagnosis = s.Status.Diagnosis
+			d.Status.TokenUsage = s.Status.TokenUsage
 			d.Status.FailureReason = s.Status.FailureReason
 			d.Status.Sandbox = s.Status.Sandbox
 		}
 	case *agenticv1alpha1.ExecutionResult:
 		if s, ok := src.(*agenticv1alpha1.ExecutionResult); ok {
 			d.Status.ActionsTaken = s.Status.ActionsTaken
+			d.Status.TokenUsage = s.Status.TokenUsage
 			d.Status.FailureReason = s.Status.FailureReason
 			d.Status.Sandbox = s.Status.Sandbox
 		}
@@ -311,6 +320,7 @@ func copyResultStatus(dst, src client.Object) {
 		if s, ok := src.(*agenticv1alpha1.VerificationResult); ok {
 			d.Status.Checks = s.Status.Checks
 			d.Status.Summary = s.Status.Summary
+			d.Status.TokenUsage = s.Status.TokenUsage
 			d.Status.FailureReason = s.Status.FailureReason
 			d.Status.Sandbox = s.Status.Sandbox
 		}
@@ -318,6 +328,7 @@ func copyResultStatus(dst, src client.Object) {
 		if s, ok := src.(*agenticv1alpha1.EscalationResult); ok {
 			d.Status.Summary = s.Status.Summary
 			d.Status.Content = s.Status.Content
+			d.Status.TokenUsage = s.Status.TokenUsage
 			d.Status.FailureReason = s.Status.FailureReason
 			d.Status.Sandbox = s.Status.Sandbox
 		}

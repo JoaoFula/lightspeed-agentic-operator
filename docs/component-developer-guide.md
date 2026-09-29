@@ -93,10 +93,10 @@ spec:
     - affected-namespace
   analysis:
     agent: smart
-  execution: {}
+  execution:
+    agent: default
   verification:
     agent: fast
-  maxAttempts: 3
   tools:
     skills:
       - image: registry.redhat.io/my-product/lightspeed-skills:latest
@@ -115,39 +115,55 @@ That's it. The operator picks it up and runs the workflow.
 Every step (analysis, execution, verification) has a built-in approval gate. The step does not run until approval is present — either auto-approved via the cluster-wide `ApprovalPolicy` or explicitly approved by the user on the `AgenticRunApproval` resource.
 
 ```
-                          +---------+
-                          | Pending |
-                          +----+----+
-                               |
-                          +----v------+
-                          | Analyzing |
-                          +----+------+
-                               |
-                    +----------+-----------+
-                    |                      |
-              +-----v------+       +------v----+
-              | Executing  |       |  Denied   |
-              +-----+------+       +-----------+
-                    |
-              +-----v------+
-              | Verifying  |
-              +-----+------+
-                    |
-          +---------+---------+
-          |                   |
-    +-----v------+    +------v----+    +-----------+
-    | Completed  |    |  Failed   +--->| Escalated |
-    +------------+    +-----------+    +-----------+
+                     +---------+
+                     | Pending |
+                     +----+----+
+                          |
+                     +----v------+
+                     | Analyzing |
+                     +----+------+
+                          |
+                     +----v-----+
+                     | Proposed |
+                     +----+-----+
+                          |
+                     +----v------+
+                     | Executing |
+                     +----+------+
+                          |
+                     +----v------+
+                     | Verifying |
+                     +----+------+
+                          |
+              +-----------+-----------+
+              |                       |
+        +-----v-----+          +------v------+
+        | Completed |          | Escalating  |
+        +-----------+          +------+------+
+                                      |
+                               +------v----+
+                               | Escalated |
+                               +-----------+
+
+  Any step can also reach a terminal state off this spine:
+    Denied  -- an approval was denied on the AgenticRunApproval.
+    Failed  -- a step failed to run: an analysis/execution error, or a
+               verification *system* failure (agent crash, timeout, or no
+               result produced). An *objective* verification failure does
+               NOT land here -- it escalates (Verifying -> Escalating ->
+               Escalated), never re-executing.
 ```
 
 - **Pending** -- AgenticRun created, waiting for reconciliation.
 - **Analyzing** -- Analysis step approved (or pending approval). Agent is running or waiting.
-- **Executing** -- Analysis complete. Execution step approved (or pending approval). Agent is running or waiting.
+- **Proposed** -- Analysis complete, awaiting execution approval (`Analyzed=True`, no `Executed` condition yet).
+- **Executing** -- Execution step approved (or pending approval). Agent is running or waiting.
 - **Denied** -- User denied a step on the AgenticRunApproval. Terminal.
 - **Verifying** -- Execution complete (or skipped). Verification step approved (or pending approval).
 - **Completed** -- Verification passed. Terminal (success).
-- **Failed** -- A step failed. May retry (up to `maxAttempts`) or escalate.
-- **Escalated** -- Max retries exhausted. A child AgenticRun is created with failure history.
+- **Failed** -- A step failed. Terminal for analysis/execution failures and for verification *system* failures (crash/timeout/no result). An objective verification failure instead escalates immediately (no retry) -- see **Escalating** / **Escalated**.
+- **Escalating** -- Verification failed and the operator is producing an `EscalationResult` (the `Escalated` condition is `Unknown`). In-flight, not terminal -- do not treat it as a final state.
+- **Escalated** -- Escalation complete. An `EscalationResult` has been produced with the execution and verification history for a human operator to assess. Terminal.
 
 ### Approval flow
 
@@ -185,9 +201,11 @@ for event := range watch.ResultChan() {
     case v1alpha1.AgenticRunPhaseCompleted:
         // Remediation succeeded
     case v1alpha1.AgenticRunPhaseFailed:
-        // Check run.Status.PreviousAttempts for failure details
+        // Inspect run.Status.Steps.*.results (and the referenced Result CRs) for failure details
+    case v1alpha1.AgenticRunPhaseEscalating:
+        // Verification failed; escalation is in progress (not yet terminal) -- keep watching
     case v1alpha1.AgenticRunPhaseEscalated:
-        // Max retries exhausted, child run created
+        // Verification failed; an EscalationResult was created for human review
     }
 }
 ```
@@ -263,43 +281,32 @@ analysisOutput:
         type: string
 ```
 
-### Per-step tools
+### Run-level tools
 
-When different steps need different skills from the same image, use per-step tools. Per-step tools **replace** (not merge with) the shared `spec.tools` for that step.
+Tools are defined once at `spec.tools` and are available to every configured step: analysis, execution, verification, and escalation. Skills, MCP servers, and required secrets are shared across the workflow.
 
 ```yaml
 spec:
-  # Shared secrets available to all steps
   tools:
+    skills:
+      - image: registry.redhat.io/acs/lightspeed-skills:latest
+        paths: [/skills/acs-remediation, /skills/acs-compliance]
     requiredSecrets:
       - name: acs-api-token
-        mountAs: ACS_API_TOKEN
+        mountAs:
+          type: EnvVar
+          envVar:
+            name: ACS_API_TOKEN
 
-  # Analysis gets remediation + compliance skills
   analysis:
     agent: smart
-    tools:
-      skills:
-        - image: registry.redhat.io/acs/lightspeed-skills:latest
-          paths: [/skills/acs-remediation, /skills/acs-compliance]
-
-  # Execution gets only remediation skills
   execution:
-    tools:
-      skills:
-        - image: registry.redhat.io/acs/lightspeed-skills:latest
-          paths: [/skills/acs-remediation]
-
-  # Verification gets only compliance skills
+    agent: default
   verification:
     agent: fast
-    tools:
-      skills:
-        - image: registry.redhat.io/acs/lightspeed-skills:latest
-          paths: [/skills/acs-compliance]
 ```
 
-Note that per-step `tools` replaces the shared `spec.tools` entirely for that step. In the example above, `requiredSecrets` from `spec.tools` are **not** automatically inherited by steps that define their own tools. If a step needs the secret, include it in the step's tools block.
+There are no per-step tool overrides. Every configured step receives the same run-level tools and required secrets.
 
 ## Workflow shapes
 
@@ -318,10 +325,10 @@ The workflow shape is defined directly on the AgenticRun by including or omittin
 spec:
   analysis:
     agent: smart
-  execution: {}
+  execution:
+    agent: default
   verification:
     agent: fast
-  maxAttempts: 3
 ```
 
 **Assisted** (analysis + verification, user applies):
@@ -524,8 +531,11 @@ type AgenticRunSpec struct {
     Verification *AgenticRunStep
 
     // Mutable fields — the designated mutation points.
-    MaxAttempts *int32  // Retry limit (patched at approval).
-    Revision    *int32  // Increment to trigger re-analysis with feedback.
+    RevisionFeedback string  // Set to feedback text to trigger re-analysis.
+    TTLAfterTerminal *int32   // Seconds to keep the run after it reaches a terminal
+                              // state before the operator deletes it (0 disables).
+                              // Overrides the cluster-wide default; may be pre-set
+                              // before the run terminates.
 }
 ```
 

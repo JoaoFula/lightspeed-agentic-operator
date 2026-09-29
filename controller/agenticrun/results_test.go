@@ -2,14 +2,45 @@ package agenticrun
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agenticv1alpha1 "github.com/openshift/lightspeed-agentic-operator/api/v1alpha1"
 )
+
+func TestBoundedFailureReason(t *testing.T) {
+	short := "permission denied"
+	if got := boundedFailureReason(short); got != short {
+		t.Fatalf("short failure reason changed: got length %d", len(got))
+	}
+
+	long := strings.Repeat("x", maxResultFailureReason+100)
+	got := boundedFailureReason(long)
+	if len(got) > maxResultFailureReason {
+		t.Fatalf("failure reason length = %d, want <= %d", len(got), maxResultFailureReason)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("truncated failure reason should end with ellipsis: %q", got[len(got)-10:])
+	}
+
+	boundary := strings.Repeat("x", maxResultFailureReason-4) + "é" + "tail"
+	got = boundedFailureReason(boundary)
+	if !utf8.ValidString(got) {
+		t.Fatal("truncated failure reason is not valid UTF-8")
+	}
+	if len(got) > maxResultFailureReason {
+		t.Fatalf("UTF-8 failure reason length = %d, want <= %d", len(got), maxResultFailureReason)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("UTF-8 truncated failure reason should end with ellipsis: %q", got[len(got)-10:])
+	}
+}
 
 func TestResultLabels_UsesUID(t *testing.T) {
 	uid := "a1b2c3d4-e5f6-7890-1234-567890abcdef"
@@ -364,7 +395,6 @@ func TestCreateIdempotent_ExecutionResult(t *testing.T) {
 	fc := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&agenticv1alpha1.ExecutionResult{}).Build()
 
-	retryIdx := int32(0)
 	cr := &agenticv1alpha1.ExecutionResult{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-execution-1",
@@ -372,8 +402,6 @@ func TestCreateIdempotent_ExecutionResult(t *testing.T) {
 		},
 		Spec: agenticv1alpha1.ExecutionResultSpec{
 			AgenticRunName: "test-run",
-
-			RetryIndex: &retryIdx,
 		},
 		Status: agenticv1alpha1.ExecutionResultStatus{
 			Conditions: []metav1.Condition{
@@ -399,5 +427,43 @@ func TestCreateIdempotent_ExecutionResult(t *testing.T) {
 	}
 	if got.Status.ActionsTaken[0].Type != "patch" {
 		t.Errorf("action type = %q, want patch", got.Status.ActionsTaken[0].Type)
+	}
+}
+
+func TestCopyResultStatus_CopiesTokenUsage(t *testing.T) {
+	tu := makeTokenUsage(100, 50)
+
+	tests := []struct {
+		name string
+		src  client.Object
+		dst  client.Object
+	}{
+		{
+			name: "AnalysisResult",
+			src:  &agenticv1alpha1.AnalysisResult{Status: agenticv1alpha1.AnalysisResultStatus{TokenUsage: tu}},
+			dst:  &agenticv1alpha1.AnalysisResult{},
+		},
+		{
+			name: "ExecutionResult",
+			src:  &agenticv1alpha1.ExecutionResult{Status: agenticv1alpha1.ExecutionResultStatus{TokenUsage: tu}},
+			dst:  &agenticv1alpha1.ExecutionResult{},
+		},
+		{
+			name: "VerificationResult",
+			src:  &agenticv1alpha1.VerificationResult{Status: agenticv1alpha1.VerificationResultStatus{TokenUsage: tu}},
+			dst:  &agenticv1alpha1.VerificationResult{},
+		},
+		{
+			name: "EscalationResult",
+			src:  &agenticv1alpha1.EscalationResult{Status: agenticv1alpha1.EscalationResultStatus{TokenUsage: tu}},
+			dst:  &agenticv1alpha1.EscalationResult{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			copyResultStatus(tt.dst, tt.src)
+			assertTokenUsage(t, extractTokenUsage(tt.dst), 100, 50)
+		})
 	}
 }

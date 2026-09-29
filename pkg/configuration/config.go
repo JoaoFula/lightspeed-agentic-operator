@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync/atomic"
 
 	corev1 "k8s.io/api/core/v1"
@@ -31,12 +33,30 @@ type MCPConfig struct {
 	CASecretName string
 }
 
+// RHOKPConfig holds RHOKP (Red Hat Offline Knowledge Portal) connectivity
+// from the ConfigMap. Present only when OKP is enabled (not ByokRAGOnly).
+type RHOKPConfig struct {
+	Endpoint     string
+	CASecretName string
+}
+
+// TLSConfig holds the normalized TLS handoff values from the ConfigMap.
+type TLSConfig struct {
+	Profile      string
+	MinVersion   string
+	CipherSuites string
+}
+
 // Config holds the parsed contents of the lightspeed-agentic-configuration
 // ConfigMap. Nil means the ConfigMap has not been seen yet.
 type Config struct {
-	Sandbox SandboxConfig
-	OTEL    OTELConfig
-	MCP     MCPConfig
+	Sandbox                     SandboxConfig
+	TLS                         TLSConfig
+	AdditionalCAConfigMap       string
+	OTEL                        OTELConfig
+	MCP                         MCPConfig
+	RHOKP                       RHOKPConfig
+	ToolOutputInspectionEnabled bool
 }
 
 // Cache is a thread-safe holder for the parsed ConfigMap contents.
@@ -47,8 +67,9 @@ type Config struct {
 // Components that need to react to config changes (e.g. OTEL provider)
 // are registered via SetOTELProvider and invoked from OnConfigMapChange.
 type Cache struct {
-	config       atomic.Pointer[Config]
-	otelProvider *Provider
+	config        atomic.Pointer[Config]
+	otelProvider  *Provider
+	ForceBareMode bool
 }
 
 // Get returns the current config, or nil if the ConfigMap has not been seen.
@@ -97,8 +118,24 @@ func (c *Cache) update(cm *corev1.ConfigMap) error {
 	if err != nil {
 		return err
 	}
+	if c.ForceBareMode && cfg.Sandbox.Mode != "bare-pod" {
+		logf.Log.Info("Sandbox CRDs not installed, overriding sandbox-mode to bare-pod", "requested", cfg.Sandbox.Mode)
+		cfg.Sandbox.Mode = "bare-pod"
+	}
 	c.config.Store(cfg)
 	return nil
+}
+
+func parseToolOutputInspectionEnabled(data map[string]string) bool {
+	raw, ok := data[KeyToolOutputInspectionEnabled]
+	if !ok {
+		return true
+	}
+	enabled, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return true
+	}
+	return enabled
 }
 
 func parseConfigMap(cm *corev1.ConfigMap) (*Config, error) {
@@ -106,6 +143,12 @@ func parseConfigMap(cm *corev1.ConfigMap) (*Config, error) {
 		Sandbox: SandboxConfig{
 			Mode: cm.Data[KeySandboxMode],
 		},
+		TLS: TLSConfig{
+			Profile:      cm.Data[KeyTLSProfile],
+			MinVersion:   cm.Data[KeyTLSMinVersion],
+			CipherSuites: cm.Data[KeyTLSCipherSuites],
+		},
+		AdditionalCAConfigMap: cm.Data[KeyAdditionalCAConfigMap],
 		OTEL: OTELConfig{
 			CollectorEndpoint: cm.Data[KeyOtelCollectorEndpoint],
 			AdminEndpoint:     cm.Data[KeyOtelAdminEndpoint],
@@ -116,6 +159,11 @@ func parseConfigMap(cm *corev1.ConfigMap) (*Config, error) {
 			Endpoint:     cm.Data[KeyMCPEndpoint],
 			CASecretName: cm.Data[KeyMCPCASecret],
 		},
+		RHOKP: RHOKPConfig{
+			Endpoint:     cm.Data[KeyRHOKPEndpoint],
+			CASecretName: cm.Data[KeyRHOKPCASecret],
+		},
+		ToolOutputInspectionEnabled: parseToolOutputInspectionEnabled(cm.Data),
 	}
 
 	if podSpecJSON, ok := cm.Data[KeySandboxPodSpec]; ok && podSpecJSON != "" {

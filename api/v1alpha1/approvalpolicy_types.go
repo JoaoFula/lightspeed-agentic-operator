@@ -51,21 +51,14 @@ type ApprovalPolicyStage struct {
 // +kubebuilder:validation:MinProperties=1
 type ApprovalPolicySpec struct {
 	// stages configures the approval mode for each workflow step.
-	// Omitted steps default to Manual.
+	// Omitted steps default to Manual, except Escalation, which is read-only
+	// and defaults to Automatic (list it as Manual to gate it explicitly).
 	// +optional
 	// +listType=map
 	// +listMapKey=name
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=4
 	Stages []ApprovalPolicyStage `json:"stages,omitempty"`
-
-	// maxAttempts sets the maximum number of execution retry attempts
-	// allowed for agentic runs. When verification fails, the operator retries
-	// execution up to this limit before escalating. Defaults to 1 if omitted.
-	// +optional
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=3
-	MaxAttempts int32 `json:"maxAttempts,omitempty"`
 
 	// maxConcurrentRuns sets the maximum number of agentic runs the
 	// operator reconciles concurrently. Higher values allow more agentic runs
@@ -88,7 +81,8 @@ type ApprovalPolicySpec struct {
 // a single ApprovalPolicy named "cluster" to control which steps auto-approve.
 //
 // Steps not listed in the policy default to Manual (require explicit
-// user approval on the AgenticRunApproval resource).
+// user approval on the AgenticRunApproval resource) — except Escalation,
+// which defaults to Automatic (see below).
 //
 // Example:
 //
@@ -104,6 +98,12 @@ type ApprovalPolicySpec struct {
 //	      approval: Manual
 //	    - name: Verification
 //	      approval: Automatic
+//
+// Escalation runs only after a verification failure and is read-only — it
+// produces a report for a human, with no cluster mutations. It therefore
+// defaults to Automatic so verification failures are not stranded at the
+// escalation gate. List it as Escalation: Manual only if you intend to gate
+// the escalation agent itself (e.g. to cap its LLM token spend).
 type ApprovalPolicy struct {
 	metav1.TypeMeta `json:",inline"`
 

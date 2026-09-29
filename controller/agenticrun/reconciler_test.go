@@ -22,13 +22,69 @@ import (
 	agenticv1alpha1 "github.com/openshift/lightspeed-agentic-operator/api/v1alpha1"
 )
 
+func TestPreserveFailedSandbox(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		want        bool
+	}{
+		{name: "absent", want: false},
+		{name: "true", annotations: map[string]string{preserveSandboxAnnotation: "true"}, want: true},
+		{name: "case insensitive", annotations: map[string]string{preserveSandboxAnnotation: " TRUE "}, want: true},
+		{name: "false", annotations: map[string]string{preserveSandboxAnnotation: "false"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			run := &agenticv1alpha1.AgenticRun{ObjectMeta: metav1.ObjectMeta{Annotations: tt.annotations}}
+			if got := preserveFailedSandbox(run); got != tt.want {
+				t.Fatalf("preserveFailedSandbox() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandleTerminalCleanupPreservesFailedSandbox(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		wantRelease int
+	}{
+		{name: "preserved", annotations: map[string]string{preserveSandboxAnnotation: "true"}, wantRelease: 0},
+		{name: "not preserved", wantRelease: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			run := testAgenticRun()
+			run.Annotations = tt.annotations
+			run.Status.Steps.Analysis.Sandbox.ClaimName = "analysis-sandbox"
+			run.Status.Conditions = []metav1.Condition{{
+				Type:   agenticv1alpha1.AgenticRunConditionAnalyzed,
+				Status: metav1.ConditionFalse,
+				Reason: reasonFailed,
+			}}
+			caller := newTestAgentCaller()
+			fc := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(run).
+				WithStatusSubresource(run).Build()
+			r := &AgenticRunReconciler{Client: fc, Agent: caller, Namespace: "default"}
+
+			if _, err := r.handleTerminalCleanup(context.Background(), run, agenticv1alpha1.AgenticRunPhaseFailed); err != nil {
+				t.Fatalf("handleTerminalCleanup: %v", err)
+			}
+			if caller.releaseAllCount != tt.wantRelease {
+				t.Fatalf("ReleaseSandboxes called %d times, want %d", caller.releaseAllCount, tt.wantRelease)
+			}
+		})
+	}
+}
+
 // --- Configurable agent stub for tests ---
 
 type testAgentCaller struct {
-	analyzeErr  error
-	executeErr  error
-	verifyErr   error
-	escalateErr error
+	analyzeErr    error
+	executeErr    error
+	verifyErr     error
+	escalateErr   error
+	escalateCalls int
 
 	// Optional result content — when set AND fc is non-nil, the step method
 	// simulates sandbox completion by creating a Result CR, recording a
@@ -101,7 +157,7 @@ func (ta *testAgentCaller) withClient(t *testing.T, fc client.Client, ns string)
 	return ta
 }
 
-func (ta *testAgentCaller) Analyze(ctx context.Context, run *agenticv1alpha1.AgenticRun, _ resolvedStep, _ string) error {
+func (ta *testAgentCaller) Analyze(ctx context.Context, run *agenticv1alpha1.AgenticRun, _ resolvedStep) error {
 	if ta.analyzeErr != nil {
 		return ta.analyzeErr
 	}
@@ -125,7 +181,8 @@ func (ta *testAgentCaller) Verify(ctx context.Context, run *agenticv1alpha1.Agen
 	return nil
 }
 
-func (ta *testAgentCaller) Escalate(ctx context.Context, run *agenticv1alpha1.AgenticRun, _ resolvedStep, _ string) error {
+func (ta *testAgentCaller) Escalate(ctx context.Context, run *agenticv1alpha1.AgenticRun, _ resolvedStep) error {
+	ta.escalateCalls++
 	if ta.escalateErr != nil {
 		return ta.escalateErr
 	}
@@ -277,16 +334,28 @@ func (ta *testAgentCaller) completeVerification(ctx context.Context, run *agenti
 	fresh.Status.Steps.Verification.Results = append(fresh.Status.Steps.Verification.Results,
 		agenticv1alpha1.StepResultRef{Name: crName, Outcome: outcome})
 
-	reason := reasonPassed
-	status := metav1.ConditionTrue
 	if !ta.verifyResult.Success {
-		reason = reasonFailed
-		status = metav1.ConditionFalse
+		// Mirror pod_handler.patchVerificationFailedEscalating (OLS-3817): an
+		// objective verification failure escalates directly instead of
+		// terminating. Verified=False/VerificationFailed plus
+		// Escalated=Unknown/VerificationFailed makes DerivePhase yield Escalating.
+		meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{
+			Type: agenticv1alpha1.AgenticRunConditionVerified, Status: metav1.ConditionFalse,
+			Reason: agenticv1alpha1.ReasonVerificationFailed, Message: fmt.Sprintf("Verification failed: %s", ta.verifyResult.Summary),
+			ObservedGeneration: fresh.Generation,
+		})
+		meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{
+			Type: agenticv1alpha1.AgenticRunConditionEscalated, Status: metav1.ConditionUnknown,
+			Reason: agenticv1alpha1.ReasonVerificationFailed, Message: "Verification failed, escalating",
+			ObservedGeneration: fresh.Generation,
+		})
+	} else {
+		meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{
+			Type: agenticv1alpha1.AgenticRunConditionVerified, Status: metav1.ConditionTrue,
+			Reason: reasonPassed, Message: ta.verifyResult.Summary,
+			ObservedGeneration: fresh.Generation,
+		})
 	}
-	meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{
-		Type: agenticv1alpha1.AgenticRunConditionVerified, Status: status, Reason: reason, Message: ta.verifyResult.Summary,
-		ObservedGeneration: fresh.Generation,
-	})
 	ta.record(ta.fc.Status().Patch(ctx, &fresh, client.MergeFrom(base)))
 }
 
@@ -386,14 +455,9 @@ func testAgenticRun() *agenticv1alpha1.AgenticRun {
 // and verification stages, so tests only need to explicitly approve execution
 // (which carries the selected option).
 func testAutoApprovePolicy() *agenticv1alpha1.ApprovalPolicy {
-	return testAutoApprovePolicyWithMaxAttempts(0)
-}
-
-func testAutoApprovePolicyWithMaxAttempts(maxAttempts int32) *agenticv1alpha1.ApprovalPolicy {
 	return &agenticv1alpha1.ApprovalPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "cluster"},
 		Spec: agenticv1alpha1.ApprovalPolicySpec{
-			MaxAttempts: maxAttempts,
 			Stages: []agenticv1alpha1.ApprovalPolicyStage{
 				{Name: agenticv1alpha1.SandboxStepAnalysis, Approval: agenticv1alpha1.ApprovalModeAutomatic},
 				{Name: agenticv1alpha1.SandboxStepVerification, Approval: agenticv1alpha1.ApprovalModeAutomatic},
@@ -406,7 +470,7 @@ func testAutoApprovePolicyWithMaxAttempts(maxAttempts int32) *agenticv1alpha1.Ap
 // objects needed to resolve a full workflow.
 func defaultObjects() []client.Object {
 	return []client.Object{
-		testDefaultAgent(), testLLM("smart"), testAutoApprovePolicy(), testReaderClusterRoleBinding(),
+		testDefaultAgent(), testLLM("smart"), &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "llm-secret", Namespace: "default"}}, testAutoApprovePolicy(), testReaderClusterRoleBinding(),
 	}
 }
 
@@ -477,7 +541,7 @@ func approveAgenticRunWithOption(t *testing.T, fc client.WithWatch, name string,
 func fakeBaseTemplate() *unstructured.Unstructured {
 	return &unstructured.Unstructured{
 		Object: map[string]any{
-			"apiVersion": "extensions.agents.x-k8s.io/v1alpha1",
+			"apiVersion": "extensions.agents.x-k8s.io/v1beta1",
 			"kind":       "SandboxTemplate",
 			"metadata": map[string]any{
 				"name":      "lightspeed-agent",
@@ -894,6 +958,28 @@ func TestReconcile_AddsFinalizersOnTerminalRun(t *testing.T) {
 	}
 	if !controllerutil.ContainsFinalizer(&updated, templogCleanupFinalizer) {
 		t.Error("templog finalizer should be added on first sight of terminal run")
+	}
+}
+
+func TestDeletion_PreservedSandboxStillReleases(t *testing.T) {
+	now := metav1.Now()
+	run := testAgenticRun()
+	run.UID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+	run.DeletionTimestamp = &now
+	run.Finalizers = []string{rbacCleanupFinalizer}
+	run.Annotations = map[string]string{preserveSandboxAnnotation: "true"}
+	run.Status.Steps.Analysis.Sandbox.ClaimName = "analysis-sandbox"
+
+	fc := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(run).
+		WithStatusSubresource(run).Build()
+	caller := newTestAgentCaller().withClient(t, fc, "default")
+	r := &AgenticRunReconciler{Client: fc, Agent: caller, Namespace: "default"}
+
+	if _, err := reconcileOnce(r, "fix-crash"); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if caller.releaseAllCount != 1 {
+		t.Fatalf("ReleaseSandboxes called %d times, want 1", caller.releaseAllCount)
 	}
 }
 

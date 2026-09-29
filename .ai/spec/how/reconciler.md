@@ -8,7 +8,7 @@ Audience: AI agents. Behavioral rules and phase semantics live in **what/** spec
 
 - Parses flags: `metrics-bind-address`, `health-probe-bind-address`, `namespace` (falls back to `POD_NAMESPACE`).
 - Builds controller-runtime `Manager` with core + `agenticv1alpha1` scheme.
-- Creates `configuration.Cache` (starts nil). Eagerly attempts `configwatch.TryLoad` for the `lightspeed-agentic-configuration` ConfigMap. Registers `configwatch.Watcher` for runtime changes.
+- Creates `configuration.Cache` (starts nil). Eagerly attempts `configwatch.TryLoad` for the `lightspeed-agentic-configuration` ConfigMap. Registers `configwatch.Watcher` for runtime changes. [PLANNED: OLS-3928] The cache also holds the effective tool-result inspection value.
 - Wires **dependency injection** directly (no `controller/setup.go`):
   - `agenticrun.NewSandboxManager(mgr.GetClient(), cfgCache, namespace, auditLogger)` → `SandboxLifecycle`.
   - `&agenticrun.SandboxAgentCaller{Sandbox, K8sClient, ClientFactory, Namespace, Audit}` → satisfies `agenticrun.AgentCaller`.
@@ -22,20 +22,21 @@ Audience: AI agents. Behavioral rules and phase semantics live in **what/** spec
 ## Module map: `controller/agenticrun/`
 
 | File | Types / primary responsibilities | Key functions / methods |
-|------|----------------------------------|-------------------------|
-| `reconciler.go` | `AgenticRunReconciler` (embeds `client.Client`, `Agent AgentCaller`, `Log`) | `Reconcile`, `SetupWithManager` |
+| ------ | ---------------------------------- | ------------------------- |
+| `reconciler.go` | `AgenticRunReconciler` (embeds `client.Client`, `Agent AgentCaller`, `Log`) | `Reconcile`, `SetupWithManager`, termination guard ordering |
 | `handlers.go` | (methods on `AgenticRunReconciler`) | `handleAnalysis`, `handleRevision`, `handleExecution`, `handleVerification`, `handleEscalation`, `handleFailed`, `denyAgenticRun`, `conditionTime`, `hasMutationSuccess`, `isObservationAction`, `analysisFailureMessage`, `executionFailureMessage` |
-| `helpers.go` | `revisionData`, `analysisQuery`, `executionQuery`, `verificationQuery`, `escalationData`; embedded templates via `//go:embed templates/*.tmpl` | `renderTemplate`, `failStep`, `statusPatch`, `hasSandboxClaims`, `isTerminal`, `setVerificationSkipped`, `getLatestAnalysisResult`, `selectedOption`, `trimNonSelectedOptions`, `resetExecutionAndVerification`, `maxAttempts`, `buildEscalationRequest`, `needsRevision`, `buildRevisionContext`, `buildAnalysisQuery`, `buildExecutionQuery`, `buildVerificationQuery`, `prettyJSON` |
+| `helpers.go` | `revisionData`, `analysisQuery`, `executionQuery`, `verificationQuery`, `escalationData`; embedded templates via `//go:embed templates/*.tmpl` | `renderTemplate`, `failStep`, `statusPatch`, `hasSandboxClaims`, `isTerminal`, `setVerificationSkipped`, `getLatestAnalysisResult`, `selectedOption`, `trimNonSelectedOptions`, `resetExecutionAndVerification`, `buildEscalationRequest`, `needsRevision`, `buildRevisionContext`, `buildAnalysisQuery`, `buildExecutionQuery`, `buildVerificationQuery`, `prettyJSON` |
 | `approval.go` | — | `getApprovalPolicy`, `getAgenticRunApproval`, `ensureAgenticRunApproval`, `isStageApproved`, `isStageDenied`, `getStageOverrideAgent`, `getStageOption` |
-| `resolve.go` | `resolvedStep`, `resolvedWorkflow` | `resolveAgenticRun`, `stepAgentName` |
+| `resolve.go` | `resolvedStep`, `resolvedWorkflow` | `resolveAgenticRun`, `stepAgentName`; [DONE: OLS-4060] resolves one run-level `ToolsSpec` from `AgenticRun.spec.tools` for all steps |
 | `agent.go` | `AgentCaller`, `StubAgentCaller`; `AnalysisOutput`, `ExecutionOutput`, `VerificationOutput`, `EscalationOutput` | Interface methods on `StubAgentCaller` |
 | `sandbox_manager.go` | `SandboxManager` | `NewSandboxManager`, `Create`, `Release`, `createBarePod`, `createSandboxClaim`, `releaseBarePod`, `releaseSandboxClaim`, `ensureSA`, `setSAOwner`, `buildInputConfigMap`, `createInputConfigMap`, `podSpecToUnstructured` |
 | `sandbox_agent.go` | `SandboxLifecycle` interface; `SandboxAgentCaller` | `Analyze`, `Execute`, `Verify`, `Escalate`, `ReleaseSandboxes`, `launchSandbox`, `patchSandboxInfo`, `buildAgentContext`, `collectFailedResults`, `stepString` |
-| `pod_handler.go` | Pod watch handler (methods on `AgenticRunReconciler`); timeout background goroutine | `handlePodEvent`, `completeStep`, `patchStepCondition`, `patchStepResult`, `releaseSandbox`, `runTimeoutLoop`, `handleTimeEvent`, `stepConditionType`, `fetchResultCR`, `podFailMessage` |
+| `pod_handler.go` | Unified pod watch handler for both bare-pod and sandbox-claim modes; shared step helpers | `handlePodEvent`, `resolveBarePodMetadata`, `resolveSandboxPodMetadata`, `completeStep`, `patchStepCondition`, `patchStepResult`, `releaseSandbox`, `stepConditionType`, `validateResultCR`, `podFailMessage`, `podTerminatedInfo` |
+| `timeout_handler.go` | Mode-dispatching timeout background goroutine; shared timeout helpers | `runTimeoutLoop`, `handleTimeEvent`, `listBarePods`, `listSandboxPods`, `isSandboxClaimMode`, `startTimedOut`, `overallTimedOut` |
 | `podspec_builder.go` | `PodSpecBuilder`; label constants (`LabelManaged`, `LabelRun`, etc.); MCP env DTOs (`mcpServerEnvEntry`, `mcpHeaderEnvEntry`) | `Build`, `buildSkills`, `buildMCPServers`, `buildRequiredSecrets`, `addProviderSpecificEnv`, `credentialsSecretName`, `providerURL`, `providerTypeString` |
 | `schemas.go` | Package vars: default/minimal analysis schemas, execution/verification/escalation schemas; `defaultOutputSchemas`, `builtInPropertyJSON` | `init` (precompute property JSON), `injectBuiltInProperty`, `outputSchemaForStep` |
 | `rbac.go` | `readerBindings atomic.Value` (cached CRB names) | `ensureExecutionRBAC`, `cleanupExecutionRBAC`, `resolveReaderBindings`, `addReaderSubject`, `removeReaderSubject`, `addSubjectToBinding`, `removeSubjectFromBinding`, `annotatedRBACNamespaces`, `deleteIfExists`, `rbacTargetNamespaces`, `truncateK8sName`, `sandboxSAName`, `executionRoleName`, `clusterRoleName`, `rbacLabels`, `rbacRulesToPolicyRules`, `normalizeCoreAPIGroup` |
-| `results.go` | `statusHolder` interface (defined; no references elsewhere in this package) | `resultCRName`, `agenticRunOwnerRef`, `resultLabels`, `executionRetryIndex`, `resultConditions`, `createAnalysisResult`, `createExecutionResult`, `createVerificationResult`, `createEscalationResult`, `createIdempotent` |
+| `results.go` | `statusHolder` interface (defined; no references elsewhere in this package) | `resultCRName`, `agenticRunOwnerRef`, `resultLabels`, `resultConditions`, `createAnalysisResult`, `createExecutionResult`, `createVerificationResult`, `createEscalationResult`, `createIdempotent` |
 | `templates/*.tmpl` | Text templates | Names: `analysis_query.tmpl`, `execution_query.tmpl`, `verification_query.tmpl`, `revision_context.tmpl`, `escalation_request.tmpl` |
 | `reconciler_test.go` | `testAgentCaller`, fixtures | `testScheme`, `testDefaultAgent`, `testAgenticRun`, `reconcileOnce`, `getAgenticRun`, … |
 | `state_machine_test.go` | Policy/combo tests | Helpers: `testManualPolicy`, `newManualReconciler`, `approveStage`, `denyStage`, `assertPhase`, … |
@@ -53,11 +54,10 @@ Audience: AI agents. Behavioral rules and phase semantics live in **what/** spec
 
 ---
 
-
 ## Module map: `controller/agenticolsconfig/`
 
 | File | Types | Key functions |
-|------|-------|----------------|
+| ------ | ------- | ---------------- |
 | `reconciler.go` | `Reconciler` (embeds `client.Client`, `EventRecorder`) | `Reconcile`, `SetupWithManager`, `handleActivation`, `handleDeactivation` |
 | `reconciler_test.go` | — | Activation/deactivation, event emission, non-terminal run requeue |
 
@@ -68,7 +68,7 @@ Audience: AI agents. Behavioral rules and phase semantics live in **what/** spec
 ## Module map: `controller/console/`
 
 | File | Types | Key functions |
-|------|-------|----------------|
+| ------ | ------- | ---------------- |
 | `reconciler.go` | `AgenticConsoleConfig` (Image, Namespace); constants for plugin name, cert, nginx config string | `EnsureAgenticConsole` (orchestrates ordered ensures), `labels`, `ensureConfigMap`, `ensureServiceAccount`, `ensureService`, `ensureDeployment`, `ensureConsolePlugin`, `ensureConsoleActivation` |
 | `reconciler_test.go` | — | Tests for idempotency, image updates, skip when no image |
 
@@ -84,11 +84,11 @@ Audience: AI agents. Behavioral rules and phase semantics live in **what/** spec
 4. **Suspension check:** Fetch `AgenticOLSConfig` singleton via `isSuspended()`. If `spec.suspended == true` and run is non-terminal: `handleSuspension` releases sandboxes (best-effort via `Agent.ReleaseSandboxes`), sets `EmergencyStopped=True` condition, status patch, return. If CR not found, treat as not suspended. See **what/system-config.md**.
 5. **Phase:** `agenticv1alpha1.DerivePhase(proposal.Status.Conditions)` — see **what/** for semantics. Now includes `EmergencyStopped` as highest-precedence terminal phase.
 6. **Finalizer add:** If not terminal and finalizer missing, add RBAC cleanup finalizer (re-fetch proposal after patch).
-7. **Terminal / failed shortcuts:** Completed/Denied/Escalated/EmergencyStopped/NoActionRequired → optional sandbox release via `Agent.ReleaseSandboxes`. `AgenticRunPhaseFailed` → `handleFailed`.
+7. **Terminal / failed shortcuts:** Completed/Denied/Escalated/EmergencyStopped → optional sandbox release via `Agent.ReleaseSandboxes`. `AgenticRunPhaseFailed` → `handleFailed`.
 8. **Shared prelude:** `getApprovalPolicy` (cluster singleton name `cluster`), `ensureAgenticRunApproval`, `resolveAgenticRun`. Resolution failure → set `AgenticRunConditionAnalyzed=False` with `reasonWorkflowFailed`, status patch, return (no requeue).
 9. **Phase switch:** Routes to `handleRevision` (if `needsRevision`) before analysis/execution/escalation arms; otherwise `handleAnalysis`, `handleExecution`, `handleVerification`, `handleEscalation`, or no-op.
 10. **Handlers** set step conditions (`Unknown` → check Result CR / pod status → `True`/`False`), process Result CRs created by sandbox, append `Status.Steps.*.Results`, `statusPatch` proposal.
-11. **[OLS-3066] Agent path (batch model):** Handlers use the async re-entry pattern defined in `what/sandbox-execution.md` rules 43–43e. On first entry: create input ConfigMap (query, output-schema, context, result-template) → create Pod/SandboxClaim with ConfigMap mounted at `/input/` → patch sandbox info → set step condition `Unknown` → return `ctrl.Result{}, nil`. Re-entry is driven by pod watch events (`handlePodEvent`) and Result CR watches, plus a background 1-minute timeout ticker (`runTimeoutLoop` / `handleTimeEvent`) as a safety net. On re-entry: check Result CR (with `Completed` condition) → process result → update run conditions → cleanup pod + ConfigMap. No synchronous polling, no HTTP calls, no `WaitReady` within a single Reconcile. See `what/sandbox-execution.md` for the full re-entry decision tree, timeout handling, and race condition mitigations.
+11. **[OLS-3066] Agent path (batch model):** Handlers use the async re-entry pattern defined in `what/sandbox-execution.md` rules 43–43e. On first entry: create input ConfigMap (query, output-schema, context, result-template) → create Pod/SandboxClaim with ConfigMap mounted at `/input/` → patch sandbox info → set step condition `Unknown` → return `ctrl.Result{}, nil`. Re-entry is driven by pod watch events (`handlePodEvent`) and Result CR watches, plus a background 1-minute timeout ticker (`runTimeoutLoop` / `handleTimeEvent`) as a safety net. [PLANNED: OLS-3743] The timeout loop uses the fixed startup deadline and the effective-agent-budget-based running deadline, and schedules checks no later than the applicable deadline. On re-entry: check Result CR (with `Completed` condition) → process result → update run conditions → cleanup pod + ConfigMap. No synchronous polling, no HTTP calls, no `WaitReady` within a single Reconcile. See `what/sandbox-execution.md` for the full re-entry decision tree, timeout handling, and race condition mitigations.
 
 ---
 
@@ -110,7 +110,7 @@ Unified sandbox lifecycle manager. Fully encapsulates SA, RBAC, ConfigMap, and p
 
 ### `PodSpecBuilder` (internal to `SandboxManager`)
 
-- **Build:** Takes base `*corev1.PodSpec` (from config cache) and overlays agent-specific configuration: LLM env vars, credential mounts, skills volumes, MCP config, required secrets, input ConfigMap volume mount [OLS-3066], SA. [OLS-3066] HTTP readiness/liveness probes are no longer set.
+- **Build:** Takes base `*corev1.PodSpec` (from config cache) and overlays agent-specific configuration: LLM env vars, credential mounts, skills volumes, MCP config, required secrets, input ConfigMap volume mount [OLS-3066], SA. [OLS-3066] HTTP readiness/liveness probes are no longer set. [PLANNED: OLS-3743] It always injects operator-resolved `LIGHTSPEED_AGENT_TIMEOUT_SECONDS` and `LIGHTSPEED_AGENT_MAX_TURNS` for the selected step Agent. [PLANNED: OLS-3928] It also injects `LIGHTSPEED_TOOL_OUTPUT_INSPECTION_ENABLED` from the configuration cache.
 - Also defines label constants (`LabelManaged`, `LabelRun`, etc.) and shared helpers (`credentialsSecretName`, `providerURL`, `providerTypeString`).
 
 **No log streaming in controller:** logs are cluster-side (`kubectl` / CLI); [OLS-3066] manager watches for Result CR creation, not endpoint readiness.
@@ -122,16 +122,18 @@ Unified sandbox lifecycle manager. Fully encapsulates SA, RBAC, ConfigMap, and p
 - **Constructor:** Struct literal with `Sandbox SandboxLifecycle`, `K8sClient`, `Namespace`, `Audit`.
 - **[OLS-3066] Batch flow:** Each `Analyze`/`Execute`/`Verify`/`Escalate` method calls `launchSandbox` which: (a) calls `Sandbox.Create` (which fully encapsulates SA, RBAC, ConfigMap, and pod creation — see `SandboxManager.Create` above), (b) patches sandbox info on the run, (c) returns nil (handler returns `ctrl.Result{}, nil`; re-entry is watch-driven via pod events and the background timeout ticker). No `WaitReady`, no HTTP call, no `serviceAccount` parameter.
 - **`buildAgentContext`:** Unchanged — `TargetNamespaces`, `ApprovedOption` / `ExecutionResult` per step, `PreviousAttempts` from failed `StepResultRef` outcomes.
-- **`ReleaseSandboxes`:** Iterates `Status.Steps.{Analysis,Execution,Verification,Escalation}.Sandbox.ClaimName` and calls `Sandbox.Release` for each non-empty. `Release` handles all cleanup (pod, SA reader-subjects, execution RBAC).
+- **`ReleaseSandboxes`:** Releases status-referenced sandboxes and, for stop paths, participates in managed-resource discovery. `Release` handles pod/claim deletion, sandbox ServiceAccount reader-subject removal, and execution RBAC cleanup. Cleanup errors are retryable after terminal status.
 
 ## `AgentHTTPClient` [OLS-3066: removed]
 
 The `AgentHTTPClient`, `AgentHTTPClientInterface`, `agentRunRequest`, `agentRunResponse`, `ClientFactory`, and `client.go` are removed under OLS-3066. The operator no longer makes HTTP calls to sandbox pods. All I/O is via ConfigMap (input) and Result CR (output).
 
-## `PodEventHandler` and timeout loop [OLS-3794]
+## Event handlers and timeout loop [OLS-3794, OLS-4070]
 
-- **`PodEventHandler`:** Registered via `Watches(&Pod{}, handler.EnqueueRequestsFromMapFunc)` in `SetupWithManager`. When a sandbox pod terminates (Succeeded/Failed), it: (a) reads the Result CR to determine agent success/failure, (b) patches the step condition on the `AgenticRun`, (c) calls `releaseSandbox` for cleanup. This drives the async lifecycle without reconciler polling.
-- **`runTimeoutLoop`:** Background goroutine started by the reconciler via `mgr.Add`. Periodically lists in-progress runs and checks per-step sandbox timeouts. When a timeout is detected, patches the step condition to `False` with reason `SandboxTimeout` and releases the sandbox.
+Two handlers — a unified pod watcher and a timeout loop.
+
+- **`handlePodEvent` (pod_handler.go):** Registered via `Watches(&Pod{}, handler.EnqueueRequestsFromMapFunc)`. Handles both bare-pod and sandbox-claim modes. In bare-pod mode, `resolveBarePodMetadata` reads `LabelRun`/`LabelStep` labels directly from the pod. In sandbox-claim mode, `resolveSandboxPodMetadata` follows the pod's ownerRef chain (Pod → Sandbox → SandboxClaim) to find the SandboxClaim which carries operator labels and `AnnotationRunName`. Both paths feed into `completeStep` when the pod terminates (Succeeded/Failed): (a) reads the Result CR to determine agent success/failure, (b) patches the step condition on the `AgenticRun`, (c) calls `releaseSandbox` for cleanup. For in-progress pods, patches step reason (`Running` / `WaitingForSandbox`).
+- **`runTimeoutLoop` (timeout_handler.go):** Background goroutine started via `mgr.Add`. Calls `handleTimeEvent` on each tick, which dispatches to `listBarePods` (labels) or `listSandboxPods` (ownerRef chain resolution) based on `isSandboxClaimMode()`. Both paths check per-step timeouts via `startTimedOut` / `overallTimedOut` and retry completion for terminal pods whose step condition patch failed earlier.
 
 ---
 
@@ -149,7 +151,6 @@ The `AgentHTTPClient`, `AgentHTTPClientInterface`, `agentRunRequest`, `agentRunR
 - **[OLS-3066]** Result CRs are created by the **sandbox** via `oc create` + `oc patch --subresource=status`, not by the operator. The operator pre-computes the Result CR template (metadata, labels, ownerRefs, spec) and includes it in the input ConfigMap — see `what/sandbox-execution.md` rules 7a and 8.
 - **Naming:** `resultCRName(agenticRunName, step, len(existingResults)+1)` with K8s name truncation — same function, now used to build the template.
 - **Owner:** Controller ref to `AgenticRun`; labels `LabelRun`, `LabelStep` — set in the template by the operator.
-- **Execution/Verification result CRs:** `Spec.RetryIndex` from `executionRetryIndex` — set in the template by the operator.
 - **`createIdempotent`:** Retained for backward compatibility but primary path is sandbox-driven creation. The operator only reads Result CRs, not creates them.
 
 ---
@@ -171,7 +172,8 @@ The `AgentHTTPClient`, `AgentHTTPClientInterface`, `agentRunRequest`, `agentRunR
 - **`AgentCaller`:** Boundary between reconciler and runtime (stub vs sandbox+batch). Methods mirror workflow steps (`Analyze`, `Execute`, `Verify`, `Escalate`) plus `ReleaseSandbox(ctx, run, step)` and `ReleaseSandboxes`. No `serviceAccount` parameter — SA management is fully encapsulated in `SandboxManager`. [OLS-3066] Production implementation no longer makes HTTP calls — it launches sandboxes via `SandboxManager.Create`, then returns. Result processing happens on re-entry when the Result CR appears.
 - **`SandboxLifecycle`:** Interface (`Create(ctx, run, step, agent, llm, tools, deadline, query, agentCtx)` / `Release(ctx, run, step)`) for swappable sandbox management (tests can fake). Production implementation: `SandboxManager`. `Create` fully encapsulates SA, RBAC, ConfigMap, and pod lifecycle. All resources use the `ls-` name prefix; `Release` dispatches by reading `cfg.Sandbox.Mode` from the config cache. [OLS-3066] `WaitReady` is removed — the operator watches for pod completion and Result CR creation instead of polling.
 - **`PodSpecBuilder`:** Internal to `SandboxManager`. Takes base `*corev1.PodSpec` from config cache and overlays agent config. Produces typed `corev1.PodSpec`; the mode then determines delivery (bare Pod or SandboxTemplate conversion).
-- **`resolveAgenticRun`:** Produces `resolvedWorkflow` with cached `Agent` + `LLMProvider` per name; applies per-stage agent overrides from `AgenticRunApproval` via `getStageOverrideAgent`; `Execution`/`Verification` steps nil when corresponding spec sections are zero.
+- **Provider-egress TLS [PLANNED: OLS-3041]:** The configuration cache reads the resolved TLS values and CA object-name references from `lightspeed-agentic-configuration`. `PodSpecBuilder` adds read-only source mounts below `/var/run/secrets/lightspeed/tls/` and passes `LIGHTSPEED_TLS_PROFILE`, `LIGHTSPEED_TLS_MIN_VERSION`, and `LIGHTSPEED_TLS_CIPHER_SUITES` unchanged. The agentic operator watches only the handoff ConfigMap; it does not inspect, aggregate, deduplicate, or watch referenced CA objects.
+- **`resolveAgenticRun`:** Produces `resolvedWorkflow` with cached `Agent` + `LLMProvider` per name; applies per-stage agent overrides from `AgenticRunApproval` via `getStageOverrideAgent`; `Execution`/`Verification` steps nil when corresponding spec sections are zero. [DONE: OLS-4060] Tool resolution is run-level only: every resolved step receives `AgenticRun.spec.tools`; step records do not carry or override tools.
 
 ---
 
@@ -189,7 +191,7 @@ cmd/main.go
 
 AgenticRunReconciler.Reconcile
   ├─ config guard: cfgCache.Available() → false: fail with clear error
-  ├─ approval.go, resolve.go
+  ├─ approval.go, resolve.go [DONE: OLS-4060: run-level tools for all steps]
   ├─ handlers.go → results.go (read Result CRs), rbac.go, helpers.go (status, option trim)
   └─ Agent (SandboxAgentCaller) [OLS-3066: batch model]
         ├─ First entry: launchSandbox
@@ -197,8 +199,8 @@ AgenticRunReconciler.Reconcile
         │   └─ patchSandboxInfo → return (watch-driven re-entry)
         ├─ Re-entry: check Result CR (Completed condition) → process result
         │   └─ Update run conditions, append result ref
-        ├─ PodEventHandler: pod terminated → process result → patch condition → releaseSandbox
-        ├─ runTimeoutLoop: periodic check → timeout → patch condition → releaseSandbox
+        ├─ handlePodEvent (both modes): pod terminated → resolveBarePodMetadata or resolveSandboxPodMetadata → process result → patch condition → releaseSandbox
+        ├─ runTimeoutLoop → handleTimeEvent: dispatches to listBarePods or listSandboxPods based on mode
         └─ Sandbox.Release (terminal phases, deletion) → GC SA/CM + remove reader subjects + execution RBAC
 ```
 
@@ -209,10 +211,12 @@ AgenticRunReconciler.Reconcile
 - **`cmd/main.go` scheme:** Registers core + `agenticv1alpha1` + `consolev1` + `openshiftv1`. No separate `controller/setup.go` — all wiring is inline in `main.go`. Watching or applying arbitrary CRDs from tests may need extended schemes (see `reconciler_test.go`).
 - **Max concurrent reconciles:** `SetupWithManager` reads cluster `ApprovalPolicy` via API reader for `MaxConcurrentRuns`, else `DefaultMaxConcurrentRuns` from API package.
 - **Policy watch:** Enqueues **all** non-terminal runs on any `ApprovalPolicy` event — can be chatty.
-- **AgenticOLSConfig watch:** Same pattern as policy watch — enqueues all non-terminal runs on any `AgenticOLSConfig` change. When `suspended` flips to `true`, all re-queued runs hit the suspension guard and get terminated.
+- **AgenticOLSConfig watch:** Enqueues runs affected by configuration changes. When `suspended` flips to `true`, non-terminal runs hit the global termination guard; the config controller also tracks managed sandbox teardown so `Draining` does not become `AdminActivated` prematurely. Stop-triggered terminal runs remain eligible for cleanup requeues.
 - **Workflow resolution errors:** Patched onto `AgenticRunConditionAnalyzed` false — see API for exact condition ordering vs `DerivePhase`.
 - **`selectedOption` vs trim:** Verification uses latest analysis result’s **first** option (`Options[0]`) when resolving; execution path uses `trimNonSelectedOptions` which respects `AgenticRunApproval` execution option index when multiple options exist.
-- **`maxAttempts`:** Combines `ApprovalPolicy.Spec.MaxAttempts` ceiling with per-approval execution override (`helpers.go`); retry semantics interact with verification failure branch in `handleVerification` (see **what/run-lifecycle.md**).
+- **No execution retries:** Execution runs exactly once per analysis iteration; verification failure escalates directly via the `Escalating` phase — there is no `maxAttempts`/retry loop (see **what/run-lifecycle.md** and **what/approval.md**).
 - **[OLS-3066] No sandbox FQDN or endpoint:** With the batch model, the operator does not construct agent URLs or connect to sandbox pods over HTTP. The former `Sandbox FQDN` note is obsolete.
 - **Logs CLI vs status:** CLI `logs` uses `SandboxInfo.ClaimName` as **pod name** in `GetLogs`; ensure cluster layout matches (if claim name ≠ pod name, logs command would need revision — operational detail for agents touching `logs.go`). [OLS-3066] Log tailing is unchanged — sandbox pods still write progress to stdout during execution.
 - **Tests:** `state_machine_test.go` is the primary lifecycle matrix; `testAgentCaller` implements `AgentCaller` with injectable errors/results; fake client uses `WithStatusSubresource` for run and result types.
+- **Tool-result inspection failure [PLANNED: OLS-3928]:** This path conforms to `openshift/ols/.ai/spec/what/tool-result-inspection.md`. The sandbox exits nonzero, publishes no Result CR, and writes `ToolResultSafetyInspectionFailed` as the termination message. `pod_handler.go` matches this message before generic `SandboxFailed` handling and uses it as the step condition reason. The condition uses the contract-defined controlled message.
+- **[PLANNED: OLS-3743] Limit resolution:** Resolve timeout and max-turn defaults in one operator helper from the selected `resolvedStep.Agent`, including approval agent overrides. The resolved timeout drives both pod env injection and hard-deadline calculation; these paths MUST NOT resolve independently.

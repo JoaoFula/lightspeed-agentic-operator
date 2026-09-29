@@ -10,6 +10,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
 	agenticv1alpha1 "github.com/openshift/lightspeed-agentic-operator/api/v1alpha1"
+	"github.com/openshift/lightspeed-agentic-operator/pkg/configuration"
 )
 
 func testBasePodSpec() *corev1.PodSpec {
@@ -332,7 +333,7 @@ func TestBuild_NilBase(t *testing.T) {
 	b := &PodSpecBuilder{}
 	agent := &agenticv1alpha1.Agent{Spec: agenticv1alpha1.AgentSpec{Model: "m"}}
 	llm := testLLMProvider(agenticv1alpha1.LLMProviderAnthropic)
-	_, err := b.Build(nil, agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "")
+	_, err := b.Build(nil, agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "", 600, 200)
 	if err == nil {
 		t.Fatal("expected error for nil base")
 	}
@@ -341,7 +342,7 @@ func TestBuild_NilBase(t *testing.T) {
 func TestBuild_NilAgent(t *testing.T) {
 	b := &PodSpecBuilder{}
 	llm := testLLMProvider(agenticv1alpha1.LLMProviderAnthropic)
-	_, err := b.Build(testBasePodSpec(), nil, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "")
+	_, err := b.Build(testBasePodSpec(), nil, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "", 600, 200)
 	if err == nil {
 		t.Fatal("expected error for nil agent")
 	}
@@ -350,7 +351,7 @@ func TestBuild_NilAgent(t *testing.T) {
 func TestBuild_NilLLM(t *testing.T) {
 	b := &PodSpecBuilder{}
 	agent := &agenticv1alpha1.Agent{Spec: agenticv1alpha1.AgentSpec{Model: "m"}}
-	_, err := b.Build(testBasePodSpec(), agent, nil, nil, nil, "analysis", "uid", "sa", "uid-test-run", "")
+	_, err := b.Build(testBasePodSpec(), agent, nil, nil, nil, "analysis", "uid", "sa", "uid-test-run", "", 600, 200)
 	if err == nil {
 		t.Fatal("expected error for nil LLM")
 	}
@@ -360,9 +361,100 @@ func TestBuild_EmptySA(t *testing.T) {
 	b := &PodSpecBuilder{}
 	agent := &agenticv1alpha1.Agent{Spec: agenticv1alpha1.AgentSpec{Model: "m"}}
 	llm := testLLMProvider(agenticv1alpha1.LLMProviderAnthropic)
-	_, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "", "uid-test-run", "")
+	_, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "", "uid-test-run", "", 600, 200)
 	if err == nil {
 		t.Fatal("expected error for empty serviceAccount")
+	}
+}
+
+func TestBuild_ConfiguredAgentLimits(t *testing.T) {
+	b := &PodSpecBuilder{}
+	agent := &agenticv1alpha1.Agent{Spec: agenticv1alpha1.AgentSpec{
+		Model:    "claude-opus-4-6",
+		MaxTurns: 3,
+		Timeouts: agenticv1alpha1.AgentTimeouts{AnalysisSeconds: 31},
+	}}
+	llm := testLLMProvider(agenticv1alpha1.LLMProviderAnthropic)
+	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "", 31, 3)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	env := envToMap(ps.Containers[0].Env)
+	if env["LIGHTSPEED_AGENT_TIMEOUT_SECONDS"] != "31" {
+		t.Errorf("configured timeout = %q, want 31", env["LIGHTSPEED_AGENT_TIMEOUT_SECONDS"])
+	}
+	if env["LIGHTSPEED_AGENT_MAX_TURNS"] != "3" {
+		t.Errorf("configured max turns = %q, want 3", env["LIGHTSPEED_AGENT_MAX_TURNS"])
+	}
+}
+
+func TestBuild_TLSHandoff(t *testing.T) {
+	b := &PodSpecBuilder{}
+	agent := &agenticv1alpha1.Agent{Spec: agenticv1alpha1.AgentSpec{Model: "m"}}
+	llm := testLLMProvider(agenticv1alpha1.LLMProviderAnthropic)
+	tls := &configuration.TLSConfig{
+		Profile:      "IntermediateType",
+		MinVersion:   "VersionTLS12",
+		CipherSuites: `["TLS_AES_128_GCM_SHA256"]`,
+	}
+
+	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, &configuration.Config{TLS: *tls}, "analysis", "uid", "sa", "uid-test-run", "", 600, 200)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	env := envToMap(ps.Containers[0].Env)
+	if env["LIGHTSPEED_TLS_PROFILE"] != tls.Profile {
+		t.Errorf("LIGHTSPEED_TLS_PROFILE = %q", env["LIGHTSPEED_TLS_PROFILE"])
+	}
+	if env["LIGHTSPEED_TLS_MIN_VERSION"] != tls.MinVersion {
+		t.Errorf("LIGHTSPEED_TLS_MIN_VERSION = %q", env["LIGHTSPEED_TLS_MIN_VERSION"])
+	}
+	if env["LIGHTSPEED_TLS_CIPHER_SUITES"] != tls.CipherSuites {
+		t.Errorf("LIGHTSPEED_TLS_CIPHER_SUITES = %q", env["LIGHTSPEED_TLS_CIPHER_SUITES"])
+	}
+}
+
+func TestBuild_AdditionalCAConfigMap(t *testing.T) {
+	b := &PodSpecBuilder{}
+	agent := &agenticv1alpha1.Agent{Spec: agenticv1alpha1.AgentSpec{Model: "m"}}
+	llm := testLLMProvider(agenticv1alpha1.LLMProviderAnthropic)
+
+	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, &configuration.Config{AdditionalCAConfigMap: "custom-ca"}, "analysis", "uid", "sa", "uid-test-run", "", 600, 200)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for _, volume := range ps.Volumes {
+		if volume.Name == "additional-ca" {
+			if volume.ConfigMap == nil || volume.ConfigMap.Name != "custom-ca" {
+				t.Fatalf("additional-ca volume has unexpected source: %#v", volume.ConfigMap)
+			}
+			for _, mount := range ps.Containers[0].VolumeMounts {
+				if mount.Name == "additional-ca" {
+					if mount.MountPath != "/var/run/secrets/lightspeed/tls/additional-ca" || !mount.ReadOnly {
+						t.Fatalf("additional-ca mount = %#v", mount)
+					}
+					return
+				}
+			}
+			t.Fatal("additional-ca volume mount not found")
+		}
+	}
+	t.Fatal("additional-ca volume not found")
+}
+
+func TestBuild_AdditionalCAConfigMapOmitted(t *testing.T) {
+	b := &PodSpecBuilder{}
+	agent := &agenticv1alpha1.Agent{Spec: agenticv1alpha1.AgentSpec{Model: "m"}}
+	llm := testLLMProvider(agenticv1alpha1.LLMProviderAnthropic)
+
+	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "", 600, 200)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for _, volume := range ps.Volumes {
+		if volume.Name == "additional-ca" {
+			t.Fatal("additional-ca volume should be omitted")
+		}
 	}
 }
 
@@ -371,7 +463,7 @@ func TestBuild_Anthropic(t *testing.T) {
 	agent := &agenticv1alpha1.Agent{Spec: agenticv1alpha1.AgentSpec{Model: "claude-opus-4-6"}}
 	llm := testLLMProviderWithURL(agenticv1alpha1.LLMProviderAnthropic, "https://custom.api")
 
-	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid-123", "my-sa", "uid-test-run", "")
+	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid-123", "my-sa", "uid-test-run", "", 600, 200)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -388,6 +480,12 @@ func TestBuild_Anthropic(t *testing.T) {
 	if env["LIGHTSPEED_PROVIDER_URL"] != "https://custom.api" {
 		t.Errorf("URL = %q", env["LIGHTSPEED_PROVIDER_URL"])
 	}
+	if env["LIGHTSPEED_AGENT_TIMEOUT_SECONDS"] != "600" {
+		t.Errorf("AGENT_TIMEOUT_SECONDS = %q, want 600", env["LIGHTSPEED_AGENT_TIMEOUT_SECONDS"])
+	}
+	if env["LIGHTSPEED_AGENT_MAX_TURNS"] != "200" {
+		t.Errorf("AGENT_MAX_TURNS = %q, want 200", env["LIGHTSPEED_AGENT_MAX_TURNS"])
+	}
 	if ps.Containers[0].ReadinessProbe != nil || ps.Containers[0].LivenessProbe != nil {
 		t.Error("HTTP probes must not be set for batch sandboxes")
 	}
@@ -398,7 +496,7 @@ func TestBuild_RequiresInputConfigMapName(t *testing.T) {
 	b := &PodSpecBuilder{}
 	agent := &agenticv1alpha1.Agent{Spec: agenticv1alpha1.AgentSpec{Model: "m"}}
 	llm := testLLMProvider(agenticv1alpha1.LLMProviderAnthropic)
-	_, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "", "")
+	_, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "", "", 600, 200)
 	if err == nil {
 		t.Fatal("expected error for empty inputConfigMapName")
 	}
@@ -410,7 +508,7 @@ func TestBuild_InputConfigMapMount(t *testing.T) {
 	llm := testLLMProvider(agenticv1alpha1.LLMProviderAnthropic)
 	const cmName = "uid-my-run"
 
-	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", cmName, "")
+	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", cmName, "", 600, 200)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -426,7 +524,7 @@ func TestBuild_Traceparent(t *testing.T) {
 	llm := testLLMProvider(agenticv1alpha1.LLMProviderAnthropic)
 	const tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 
-	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", tp)
+	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", tp, 600, 200)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -435,7 +533,7 @@ func TestBuild_Traceparent(t *testing.T) {
 		t.Fatalf("TRACEPARENT = %q, want %q", env["TRACEPARENT"], tp)
 	}
 
-	ps, err = b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "")
+	ps, err = b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "", 600, 200)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -483,7 +581,7 @@ func TestBuild_Vertex(t *testing.T) {
 	agent := &agenticv1alpha1.Agent{Spec: agenticv1alpha1.AgentSpec{Model: "gemini-2.0"}}
 	llm := testLLMProvider(agenticv1alpha1.LLMProviderGoogleCloudVertex)
 
-	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "")
+	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "", 600, 200)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -507,7 +605,7 @@ func TestBuild_Azure(t *testing.T) {
 	agent := &agenticv1alpha1.Agent{Spec: agenticv1alpha1.AgentSpec{Model: "gpt-4o"}}
 	llm := testLLMProvider(agenticv1alpha1.LLMProviderAzureOpenAI)
 
-	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "")
+	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "", 600, 200)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -528,7 +626,7 @@ func TestBuild_Bedrock(t *testing.T) {
 	agent := &agenticv1alpha1.Agent{Spec: agenticv1alpha1.AgentSpec{Model: "claude-v3"}}
 	llm := testLLMProvider(agenticv1alpha1.LLMProviderAWSBedrock)
 
-	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "")
+	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "", 600, 200)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -546,7 +644,7 @@ func TestBuild_OpenAI(t *testing.T) {
 	agent := &agenticv1alpha1.Agent{Spec: agenticv1alpha1.AgentSpec{Model: "gpt-4o"}}
 	llm := testLLMProviderWithURL(agenticv1alpha1.LLMProviderOpenAI, "https://api.example.com")
 
-	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "")
+	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "", 600, 200)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -572,7 +670,7 @@ func TestBuild_ReasoningConfig(t *testing.T) {
 	}
 	llm := testLLMProvider(agenticv1alpha1.LLMProviderAnthropic)
 
-	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "")
+	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "", 600, 200)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -595,7 +693,7 @@ func TestBuild_NoReasoningConfig(t *testing.T) {
 	agent := &agenticv1alpha1.Agent{Spec: agenticv1alpha1.AgentSpec{Model: "m"}}
 	llm := testLLMProvider(agenticv1alpha1.LLMProviderAnthropic)
 
-	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "")
+	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "", 600, 200)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -610,7 +708,7 @@ func TestBuild_CredentialsSecretMounted(t *testing.T) {
 	agent := &agenticv1alpha1.Agent{Spec: agenticv1alpha1.AgentSpec{Model: "m"}}
 	llm := testLLMProvider(agenticv1alpha1.LLMProviderAnthropic)
 
-	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "")
+	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "", 600, 200)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -635,6 +733,142 @@ func TestBuild_CredentialsSecretMounted(t *testing.T) {
 	}
 	if !foundMount {
 		t.Errorf("credentials volume not mounted at %s", llmCredsMountPath)
+	}
+}
+
+func TestBuild_RHOKPEndpointAndCA(t *testing.T) {
+	b := &PodSpecBuilder{}
+	agent := &agenticv1alpha1.Agent{Spec: agenticv1alpha1.AgentSpec{Model: "m"}}
+	llm := testLLMProvider(agenticv1alpha1.LLMProviderAnthropic)
+	rhokp := &configuration.RHOKPConfig{
+		Endpoint:     "https://lightspeed-rhokp.ns.svc:8443",
+		CASecretName: "lightspeed-agentic-rhokp-ca",
+	}
+
+	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, &configuration.Config{RHOKP: *rhokp}, "analysis", "uid", "sa", "uid-test-run", "", 600, 200)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	foundEndpoint := false
+	foundCA := false
+	for _, e := range ps.Containers[0].Env {
+		if e.Name == "LIGHTSPEED_RHOKP_ENDPOINT" && e.Value == rhokp.Endpoint {
+			foundEndpoint = true
+		}
+		if e.Name == "LIGHTSPEED_RHOKP_CA_CERTIFICATE" && e.Value == rhokpCAMountPath+"/"+rhokpCASecretKey {
+			foundCA = true
+		}
+	}
+	if !foundEndpoint {
+		t.Error("LIGHTSPEED_RHOKP_ENDPOINT env var not set")
+	}
+	if !foundCA {
+		t.Error("LIGHTSPEED_RHOKP_CA_CERTIFICATE env var not set")
+	}
+
+	foundVolume := false
+	for _, v := range ps.Volumes {
+		if v.Name == rhokpCAVolumeName && v.Secret != nil && v.Secret.SecretName == rhokp.CASecretName {
+			foundVolume = true
+		}
+	}
+	if !foundVolume {
+		t.Error("RHOKP CA volume not added")
+	}
+
+	foundMount := false
+	for _, m := range ps.Containers[0].VolumeMounts {
+		if m.Name == rhokpCAVolumeName && m.MountPath == rhokpCAMountPath && m.ReadOnly {
+			foundMount = true
+		}
+	}
+	if !foundMount {
+		t.Errorf("RHOKP CA volume not mounted at %s", rhokpCAMountPath)
+	}
+}
+
+func TestBuild_AllCAReferencesUseTLSRoot(t *testing.T) {
+	b := &PodSpecBuilder{}
+	agent := &agenticv1alpha1.Agent{Spec: agenticv1alpha1.AgentSpec{Model: "m"}}
+	llm := testLLMProvider(agenticv1alpha1.LLMProviderAnthropic)
+	cfg := &configuration.Config{
+		AdditionalCAConfigMap: "additional-ca-configmap",
+		OTEL: configuration.OTELConfig{
+			CollectorEndpoint: "collector:4317",
+			CASecretName:      "otel-ca-secret",
+		},
+		MCP: configuration.MCPConfig{CASecretName: "mcp-ca-secret"},
+		RHOKP: configuration.RHOKPConfig{
+			Endpoint:     "https://rhokp.example.com",
+			CASecretName: "rhokp-ca-secret",
+		},
+	}
+
+	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, cfg, "analysis", "uid", "sa", "uid-test-run", "", 600, 200)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	expectedMounts := map[string]string{
+		"otel-ca":       "/var/run/secrets/lightspeed/tls/otel",
+		"mcp-ca":        "/var/run/secrets/lightspeed/tls/mcp",
+		"rhokp-ca":      "/var/run/secrets/lightspeed/tls/rhokp",
+		"additional-ca": "/var/run/secrets/lightspeed/tls/additional-ca",
+	}
+	mounts := make(map[string]corev1.VolumeMount)
+	for _, mount := range ps.Containers[0].VolumeMounts {
+		mounts[mount.Name] = mount
+	}
+	for name, path := range expectedMounts {
+		mount, ok := mounts[name]
+		if !ok {
+			t.Errorf("missing %s mount", name)
+			continue
+		}
+		if mount.MountPath != path || !mount.ReadOnly {
+			t.Errorf("%s mount = %#v, want read-only mount at %q", name, mount, path)
+		}
+	}
+
+	volumes := make(map[string]corev1.Volume)
+	for _, volume := range ps.Volumes {
+		volumes[volume.Name] = volume
+	}
+	for name := range expectedMounts {
+		if _, ok := volumes[name]; !ok {
+			t.Errorf("missing %s volume", name)
+		}
+	}
+	if volumes["mcp-ca"].Secret == nil || volumes["mcp-ca"].Secret.SecretName != "mcp-ca-secret" {
+		t.Errorf("mcp-ca volume = %#v", volumes["mcp-ca"].Secret)
+	}
+
+	env := envToMap(ps.Containers[0].Env)
+	if env["LIGHTSPEED_RHOKP_CA_CERTIFICATE"] != "/var/run/secrets/lightspeed/tls/rhokp/rhokp-ca.crt" {
+		t.Errorf("LIGHTSPEED_RHOKP_CA_CERTIFICATE = %q", env["LIGHTSPEED_RHOKP_CA_CERTIFICATE"])
+	}
+}
+
+func TestBuild_RHOKPOmitted(t *testing.T) {
+	b := &PodSpecBuilder{}
+	agent := &agenticv1alpha1.Agent{Spec: agenticv1alpha1.AgentSpec{Model: "m"}}
+	llm := testLLMProvider(agenticv1alpha1.LLMProviderAnthropic)
+
+	ps, err := b.Build(testBasePodSpec(), agent, llm, nil, nil, "analysis", "uid", "sa", "uid-test-run", "", 600, 200)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	for _, e := range ps.Containers[0].Env {
+		if e.Name == "LIGHTSPEED_RHOKP_ENDPOINT" {
+			t.Error("LIGHTSPEED_RHOKP_ENDPOINT should not be set when RHOKP is nil")
+		}
+	}
+	for _, v := range ps.Volumes {
+		if v.Name == rhokpCAVolumeName {
+			t.Error("RHOKP CA volume should not be present when RHOKP is nil")
+		}
 	}
 }
 
@@ -664,7 +898,7 @@ func TestBuild_DeduplicatesVolumes(t *testing.T) {
 		}},
 	}
 
-	ps, err := b.Build(base, agent, llm, tools, nil, "analysis", "uid", "sa", "uid-test-run", "")
+	ps, err := b.Build(base, agent, llm, tools, nil, "analysis", "uid", "sa", "uid-test-run", "", 600, 200)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -746,7 +980,7 @@ func TestBuild_GeneratedVolumeOverridesBase(t *testing.T) {
 		Skills: []agenticv1alpha1.SkillsSource{{Image: "quay.io/real/skills:v1"}},
 	}
 
-	ps, err := b.Build(base, agent, llm, tools, nil, "analysis", "uid", "sa", "uid-test-run", "")
+	ps, err := b.Build(base, agent, llm, tools, nil, "analysis", "uid", "sa", "uid-test-run", "", 600, 200)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
