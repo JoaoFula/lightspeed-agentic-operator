@@ -151,11 +151,9 @@ type AgentSpec struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
 // +kubebuilder:printcolumn:name="LLM",type=string,JSONPath=`.spec.llmProvider.name`
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model`
-// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // Agent defines a cluster-scoped agent tier (e.g., "default", "smart", "fast").
@@ -208,36 +206,6 @@ type Agent struct {
 	// spec defines the desired state of Agent.
 	// +required
 	Spec AgentSpec `json:"spec,omitzero"`
-
-	// status defines the observed state of Agent.
-	// +optional
-	Status AgentStatus `json:"status,omitzero"`
-}
-
-const (
-	// AgentConditionReady indicates whether all referenced resources
-	// (LLMProvider, Secrets) exist and are accessible.
-	AgentConditionReady string = "Ready"
-)
-
-// AgentStatus defines the observed state of Agent. The operator
-// validates that all referenced resources exist and reports readiness
-// via standard Kubernetes conditions. An empty status (`status: {}`)
-// is the initial state before the operator's first reconcile.
-//
-// +kubebuilder:validation:MinProperties=1
-type AgentStatus struct {
-	// conditions represent the latest available observations of the
-	// Agent's state. The Ready condition summarizes whether all
-	// referenced resources (LLMProvider, Secrets) are present.
-	// +listType=map
-	// +listMapKey=type
-	// +patchStrategy=merge
-	// +patchMergeKey=type
-	// +optional
-	// +kubebuilder:validation:MinItems=1
-	// +kubebuilder:validation:MaxItems=8
-	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
 }
 
 // +kubebuilder:object:root=true

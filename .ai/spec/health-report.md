@@ -4,10 +4,6 @@ Last evaluated: 2026-07-27
 Trigger: post OLS-3685/OLS-3686 implementation (SandboxManager unification, config cache)
 Layout: software (.ai/spec/)
 
-## Stale
-
-1. **what/crd-api.md rule 18** — States "Agent — `status.conditions`: Observed readiness; `Ready` condition documents whether referenced provider resources are accessible (see operator reconcile behavior)." No Agent reconciler exists in the codebase; the operator only reconciles `AgenticRun` CRs. Rule 18 should be marked `[PLANNED]` or reworded to clarify this is aspirational rather than implemented behavior.
-
 ## Missing
 
 1. **Console plugin behavioral rules** — `controller/console/` deploys a console plugin (Deployment, Service, ConfigMap, ConsolePlugin CR, Console activation), but no what/ file defines behavioral rules for this component. It is only documented in how/reconciler.md as implementation detail. Consider adding a `what/console-plugin.md` if the console deployment has rules worth specifying (idempotency, image absence handling, activation semantics).
