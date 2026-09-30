@@ -71,12 +71,12 @@ type DiagnosisResult struct {
 	// more deterministic root causes.
 	// +optional
 	Confidence ConfidenceLevel `json:"confidence,omitempty"`
-	// rootCause is a concise Markdown-formatted description of the identified
-	// root cause (e.g., "OOMKilled due to memory limit of 256Mi").
-	// Maximum 1024 characters.
+	// rootCause is a concise Markdown-formatted explanation of the causal chain,
+	// including affected services when relevant. Detailed findings belong in summary.
+	// Maximum 8192 characters.
 	// +required
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=1024
+	// +kubebuilder:validation:MaxLength=8192
 	RootCause string `json:"rootCause,omitempty"`
 }
 

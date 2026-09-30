@@ -231,6 +231,66 @@ func TestSchemasCoverCRDMaxLength(t *testing.T) {
 	}
 }
 
+// TestDiagnosisRootCauseLimit checks the generated CRD and LLM schemas allow
+// longer complex diagnoses while retaining the same bounded rootCause length.
+func TestDiagnosisRootCauseLimit(t *testing.T) {
+	const want = int64(8192)
+	raw, err := os.ReadFile(filepath.Join(crdBasesDir(t), "agentic.openshift.io_analysisresults.yaml"))
+	if err != nil {
+		t.Fatalf("read CRD: %v", err)
+	}
+	var crd apiextensionsv1.CustomResourceDefinition
+	if err := yaml.Unmarshal(raw, &crd); err != nil {
+		t.Fatalf("unmarshal CRD: %v", err)
+	}
+	if len(crd.Spec.Versions) == 0 {
+		t.Fatal("CRD declares no versions")
+	}
+	for _, version := range crd.Spec.Versions {
+		if version.Schema == nil || version.Schema.OpenAPIV3Schema == nil {
+			t.Fatalf("CRD version %s has no schema", version.Name)
+		}
+		status := version.Schema.OpenAPIV3Schema.Properties["status"]
+		top := status.Properties["diagnosis"].Properties["rootCause"]
+		options := status.Properties["options"]
+		if options.Items == nil || options.Items.Schema == nil {
+			t.Fatal("CRD options has no item schema")
+		}
+		perOption := options.Items.Schema.Properties["diagnosis"].Properties["rootCause"]
+		for name, prop := range map[string]apiextensionsv1.JSONSchemaProps{"status.diagnosis": top, "status.options[].diagnosis": perOption} {
+			if prop.MaxLength == nil {
+				t.Errorf("%s.rootCause has no maxLength, want %d", name, want)
+			} else if *prop.MaxLength != want {
+				t.Errorf("%s.rootCause maxLength = %d, want %d", name, *prop.MaxLength, want)
+			}
+		}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		schema json.RawMessage
+		path   []string
+	}{
+		{"default top-level", AnalysisOutputSchema, []string{"properties", "diagnosis", "properties", "rootCause"}},
+		{"default per-option", AnalysisOutputSchema, []string{"properties", "options", "items", "properties", "diagnosis", "properties", "rootCause"}},
+		{"minimal top-level", MinimalAnalysisOutputSchema, []string{"properties", "diagnosis", "properties", "rootCause"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var schema map[string]any
+			if err := json.Unmarshal(tc.schema, &schema); err != nil {
+				t.Fatalf("unmarshal LLM schema: %v", err)
+			}
+			rootCause, ok := digObject(schema, tc.path...)
+			if !ok {
+				t.Fatal("LLM schema missing rootCause")
+			}
+			if got, ok := rootCause["maxLength"].(float64); !ok || int64(got) != want {
+				t.Errorf("rootCause maxLength = %v, want %d", rootCause["maxLength"], want)
+			}
+		})
+	}
+}
+
 // assertMaxLengthCoverage walks a CRD schema node and the corresponding LLM
 // schema node in parallel, asserting that every string field with a CRD
 // maxLength also has a maxLength in the LLM schema.
