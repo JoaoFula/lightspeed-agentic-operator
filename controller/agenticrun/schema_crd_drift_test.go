@@ -23,6 +23,47 @@ func crdBasesDir(t *testing.T) string {
 	return filepath.Join(filepath.Dir(thisFile), "..", "..", "config", "crd", "bases")
 }
 
+// TestAgentCRDHasNoUnreportedReadyColumn ensures `oc get agents` does not
+// advertise readiness that the operator never writes to Agent status.
+func TestAgentCRDHasNoUnreportedReadyColumn(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(crdBasesDir(t), "agentic.openshift.io_agents.yaml"))
+	if err != nil {
+		t.Fatalf("read Agent CRD: %v", err)
+	}
+	var crd apiextensionsv1.CustomResourceDefinition
+	if err := yaml.Unmarshal(raw, &crd); err != nil {
+		t.Fatalf("unmarshal Agent CRD: %v", err)
+	}
+	for _, version := range crd.Spec.Versions {
+		for _, column := range version.AdditionalPrinterColumns {
+			if column.Name == "Ready" {
+				t.Errorf("Agent CRD version %s advertises a Ready column without a status writer", version.Name)
+			}
+		}
+	}
+}
+
+// TestAgentCRDHasNoStatus ensures the configuration-only Agent CRD does not
+// advertise a status field or status subresource that no controller maintains.
+func TestAgentCRDHasNoStatus(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(crdBasesDir(t), "agentic.openshift.io_agents.yaml"))
+	if err != nil {
+		t.Fatalf("read Agent CRD: %v", err)
+	}
+	var crd apiextensionsv1.CustomResourceDefinition
+	if err := yaml.Unmarshal(raw, &crd); err != nil {
+		t.Fatalf("unmarshal Agent CRD: %v", err)
+	}
+	for _, version := range crd.Spec.Versions {
+		if _, ok := version.Schema.OpenAPIV3Schema.Properties["status"]; ok {
+			t.Errorf("Agent CRD version %s declares an unused status field", version.Name)
+		}
+		if version.Subresources != nil && version.Subresources.Status != nil {
+			t.Errorf("Agent CRD version %s declares an unused status subresource", version.Name)
+		}
+	}
+}
+
 // TestSchemasCoverCRDRequiredFields guards against the schema/CRD contract
 // drift described in lightspeed-agentic-operator#162: the JSON schema sent to
 // the LLM for structured output must mark as required every field the result
