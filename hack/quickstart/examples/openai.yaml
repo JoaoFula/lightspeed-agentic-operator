@@ -20,7 +20,7 @@ metadata:
 spec:
   llmProvider:
     name: openai
-  model: "gpt-5.4"
+  model: "gpt-6-luna"
   reasoningConfig:
     effort: "high"
     summary: "auto"
