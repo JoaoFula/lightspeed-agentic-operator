@@ -2,6 +2,7 @@ package agenticrun
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	agenticv1alpha1 "github.com/openshift/lightspeed-agentic-operator/api/v1alpha1"
@@ -56,6 +57,33 @@ func TestAnalysisOutputSchema_ValidJSON(t *testing.T) {
 	}
 	if parsed["type"] != "object" {
 		t.Errorf("type = %v, want object", parsed["type"])
+	}
+}
+
+func TestAnalysisRootCauseDescriptionsEncourageConciseness(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		schema json.RawMessage
+		path   []string
+	}{
+		{"default top-level", AnalysisOutputSchema, []string{"properties", "diagnosis", "properties", "rootCause"}},
+		{"default per-option", AnalysisOutputSchema, []string{"properties", "options", "items", "properties", "diagnosis", "properties", "rootCause"}},
+		{"minimal top-level", MinimalAnalysisOutputSchema, []string{"properties", "diagnosis", "properties", "rootCause"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var schema map[string]any
+			if err := json.Unmarshal(tc.schema, &schema); err != nil {
+				t.Fatalf("unmarshal schema: %v", err)
+			}
+			rootCause, ok := digObject(schema, tc.path...)
+			if !ok {
+				t.Fatal("schema missing rootCause")
+			}
+			description, ok := rootCause["description"].(string)
+			if !ok || !strings.Contains(description, "concise") || !strings.Contains(description, "summary") || strings.Contains(description, "OOMKilled") {
+				t.Errorf("rootCause description should request a concise explanation, direct details to summary, and avoid a specific diagnosis example: %q", description)
+			}
+		})
 	}
 }
 

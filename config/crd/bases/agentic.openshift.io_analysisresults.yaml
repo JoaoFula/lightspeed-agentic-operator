@@ -157,10 +157,10 @@ spec:
                     type: string
                   rootCause:
                     description: |-
-                      rootCause is a concise Markdown-formatted description of the identified
-                      root cause (e.g., "OOMKilled due to memory limit of 256Mi").
-                      Maximum 1024 characters.
-                    maxLength: 1024
+                      rootCause is a concise Markdown-formatted explanation of the causal chain,
+                      including affected services when relevant. Detailed findings belong in summary.
+                      Maximum 8192 characters.
+                    maxLength: 8192
                     minLength: 1
                     type: string
                   summary:
@@ -222,10 +222,10 @@ spec:
                           type: string
                         rootCause:
                           description: |-
-                            rootCause is a concise Markdown-formatted description of the identified
-                            root cause (e.g., "OOMKilled due to memory limit of 256Mi").
-                            Maximum 1024 characters.
-                          maxLength: 1024
+                            rootCause is a concise Markdown-formatted explanation of the causal chain,
+                            including affected services when relevant. Detailed findings belong in summary.
+                            Maximum 8192 characters.
+                          maxLength: 8192
                           minLength: 1
                           type: string
                         summary:

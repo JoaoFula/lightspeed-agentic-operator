@@ -45,7 +45,7 @@ var AnalysisOutputSchema = json.RawMessage(schemaReplacer.Replace(`{
       "description": "Top-level root cause analysis. Required when actionRequired is false. When actionRequired is true, diagnosis is provided per-option instead.",
       "properties": {
         "summary": { "type": "string", "maxLength": {{maxLenDiagnosisSummary}}, "description": "Markdown-formatted diagnosis summary explaining the problem, symptoms, and findings" },
-        "rootCause": { "type": "string", "maxLength": {{maxLenDiagnosisRootCause}}, "description": "Concise one-line root cause" }
+        "rootCause": { "type": "string", "maxLength": {{maxLenDiagnosisRootCause}}, "description": "Keep the root cause concise: explain the causal chain, including affected services when relevant, in a few sentences. Put detailed findings in the diagnosis summary" }
       },
       "required": ["summary", "rootCause"]
     },
@@ -62,7 +62,7 @@ var AnalysisOutputSchema = json.RawMessage(schemaReplacer.Replace(`{
             "type": "object",
             "properties": {
               "summary": { "type": "string", "maxLength": {{maxLenDiagnosisSummary}}, "description": "Markdown-formatted root cause analysis explaining the problem, symptoms, and findings" },
-              "rootCause": { "type": "string", "maxLength": {{maxLenDiagnosisRootCause}}, "description": "Concise one-line root cause (e.g., 'OOMKilled due to memory limit of 256Mi')" }
+              "rootCause": { "type": "string", "maxLength": {{maxLenDiagnosisRootCause}}, "description": "Keep the root cause concise: explain the causal chain, including affected services when relevant, in a few sentences. Put detailed findings in the diagnosis summary" }
             },
             "required": ["summary", "rootCause"]
           },
@@ -179,7 +179,7 @@ var MinimalAnalysisOutputSchema = json.RawMessage(schemaReplacer.Replace(`{
       "description": "Top-level root cause analysis. Required when actionRequired is false.",
       "properties": {
         "summary": { "type": "string", "maxLength": {{maxLenDiagnosisSummary}}, "description": "Markdown-formatted diagnosis summary" },
-        "rootCause": { "type": "string", "maxLength": {{maxLenDiagnosisRootCause}}, "description": "Concise one-line root cause" }
+        "rootCause": { "type": "string", "maxLength": {{maxLenDiagnosisRootCause}}, "description": "Keep the root cause concise: explain the causal chain, including affected services when relevant, in a few sentences. Put detailed findings in the diagnosis summary" }
       },
       "required": ["summary", "rootCause"]
     },

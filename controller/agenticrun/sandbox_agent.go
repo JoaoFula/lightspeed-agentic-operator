@@ -56,7 +56,7 @@ const (
 	maxLenOptionTitle              = 256
 	maxLenOptionSummary            = 1024
 	maxLenDiagnosisSummary         = 8192
-	maxLenDiagnosisRootCause       = 1024
+	maxLenDiagnosisRootCause       = 8192
 	maxLenPlanDescription          = 8192
 	maxLenActionCommand            = 4096
 	maxLenActionType               = 256
