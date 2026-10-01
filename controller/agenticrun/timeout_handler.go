@@ -29,21 +29,31 @@ func (r *AgenticRunReconciler) isSandboxClaimMode() bool {
 // runTimeoutLoop dispatches to the mode-appropriate timeout handler.
 // Stopped when ctx is cancelled (manager shutdown).
 func (r *AgenticRunReconciler) runTimeoutLoop(ctx context.Context) error {
-	if err := r.sweepExpiredRuns(ctx); err != nil {
-		logf.FromContext(ctx).Error(err, "failed to sweep expired AgenticRuns")
-	}
+	// Expiry is cleanup, not workflow progress: it must also run when the
+	// version gate is Unknown or Disabled.
+	r.sweepExpiredRunsAndLog(ctx)
 	for i := 1; ; i++ {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-time.After(sandboxTimeoutCheckInterval):
-			r.handlePodTimeEvent(ctx)
-			if i%60 == 0 {
-				if err := r.sweepExpiredRuns(ctx); err != nil {
-					logf.FromContext(ctx).Error(err, "failed to sweep expired AgenticRuns")
-				}
-			}
+			r.handleTimeoutTick(ctx, i)
 		}
+	}
+}
+
+func (r *AgenticRunReconciler) handleTimeoutTick(ctx context.Context, tick int) {
+	if r.Version.Enabled(ctx) {
+		r.handlePodTimeEvent(ctx)
+	}
+	if tick%60 == 0 {
+		r.sweepExpiredRunsAndLog(ctx)
+	}
+}
+
+func (r *AgenticRunReconciler) sweepExpiredRunsAndLog(ctx context.Context) {
+	if err := r.sweepExpiredRuns(ctx); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to sweep expired AgenticRuns")
 	}
 }
 
