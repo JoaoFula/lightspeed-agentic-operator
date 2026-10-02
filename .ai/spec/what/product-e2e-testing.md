@@ -56,8 +56,13 @@ and behavioral correctness of fixes remain out of scope.
 
 1. `make product-e2e-disconnected` MUST provide a connected provisioning phase
    followed by restricted runtime execution. It MUST clone `lightspeed-service`
-   at a required, verified full commit SHA and consume the reusable OLS-4228
-   Gemma provisioning handoff. Provisioning code MUST NOT be copied here.
+   at a required, verified full commit SHA. The operator caller MUST orchestrate
+   that checkout's individual RHOAI scripts/manifests and select its existing
+   `gemma-4-31b` profile, following the service calling-script pattern. Reused
+   provisioning assets MUST NOT be copied here; no separate service provisioning
+   entrypoint is required. The operator MUST discover the internal Service
+   endpoint/ports/selector and confirm the exact model with an authenticated
+   models request, producing the handoff for restricted execution.
 2. Gemma MUST reuse the existing OpenAI provider, with its exact model ID and
    cluster-internal `/v1` URL returned by provisioning. No new provider type.
 3. The suite MUST reuse standard `product_e2e` discovery and assertions with
@@ -95,8 +100,9 @@ and behavioral correctness of fixes remain out of scope.
 
 - Requires a GPU OpenShift test cluster with enforceable NetworkPolicy and
   internal-registry image access, plus connected model preparation.
-- CI owns image mirroring and the cluster/job. Service owns GPU/model-serving
-  provisioning and its resource lifecycle.
+- CI owns image mirroring, the cluster/job and provisioning-resource teardown.
+  Service owns reusable GPU/model-serving scripts, manifests and model profiles;
+  the operator owns their orchestration and the restricted-test handoff.
 - Probe images must provide Python 3. This variant permits DNS/API/vLLM only;
   optional OTEL/MCP/RHOKP dependencies require future explicit policy extensions.
 - Out of scope: LSEval, LLM judges, new Gemma adapters, sandbox-claim coverage,

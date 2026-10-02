@@ -19,6 +19,10 @@ if [[ -n "${ARTIFACT_DIR:-}" ]]; then
         oc get pods,events,inferenceservices.serving.kserve.io,servingruntimes.serving.kserve.io \
             -n "$RHOAI_VLLM_NAMESPACE" -o yaml --request-timeout=30s \
             2>&1 | python3 "$SCRIPT_DIR/e2e-redact.py" > "$dir/inference.yaml" || true
+        # Readiness may fail before the service Pod-info helper collects logs.
+        oc logs -n "$RHOAI_VLLM_NAMESPACE" -l serving.kserve.io/inferenceservice=vllm-model \
+            --all-containers --prefix --tail=500 --request-timeout=30s \
+            2>&1 | python3 "$SCRIPT_DIR/e2e-redact.py" > "$dir/inference.log" || true
     fi
 fi
 

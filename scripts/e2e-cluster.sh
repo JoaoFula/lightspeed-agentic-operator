@@ -50,7 +50,13 @@ _cleanup_on_exit() {
     log_info "Running cleanup..."
     # Keep the operator alive while aborted runs execute their finalizers.
     if [[ "${E2E_DISCONNECTED:-false}" == true ]]; then
-        bash "$SCRIPT_DIR/e2e-disconnected-cleanup.sh" || cleanup_rc=$?
+        if bash "$SCRIPT_DIR/e2e-disconnected-cleanup.sh"; then
+            if [[ -n "${E2E_DISCONNECTED_CLEANUP_MARKER:-}" ]]; then
+                touch "$E2E_DISCONNECTED_CLEANUP_MARKER" || cleanup_rc=$?
+            fi
+        else
+            cleanup_rc=$?
+        fi
     fi
     cleanup_e2e_otel "$NAMESPACE"
     cleanup_operator
