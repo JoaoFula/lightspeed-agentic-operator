@@ -88,7 +88,6 @@ func stepTimeout(step string) time.Duration {
 // Agent context types — shared by input ConfigMap builder and helpers.
 
 type agentContext struct {
-	TargetNamespaces []string                           `json:"targetNamespaces,omitempty"`
 	PreviousAttempts []agentPreviousAttempt             `json:"previousAttempts,omitempty"`
 	ApprovedOption   *agenticv1alpha1.RemediationOption `json:"approvedOption,omitempty"`
 	ExecutionResult  *agentExecutionResult              `json:"executionResult,omitempty"`
@@ -290,9 +289,7 @@ func collectFailedResults(results []agenticv1alpha1.StepResultRef, stepName stri
 }
 
 func buildAgentContext(run *agenticv1alpha1.AgenticRun) *agentContext {
-	ctx := &agentContext{
-		TargetNamespaces: run.Spec.TargetNamespaces,
-	}
+	ctx := &agentContext{}
 
 	ctx.PreviousAttempts = append(ctx.PreviousAttempts, collectFailedResults(run.Status.Steps.Analysis.Results, "analysis")...)
 	ctx.PreviousAttempts = append(ctx.PreviousAttempts, collectFailedResults(run.Status.Steps.Execution.Results, "execution")...)

@@ -20,8 +20,6 @@ spec:
     AlertManager alert fired: HighCPUUsage (critical)
     Pod api-server in namespace production is using 95% CPU for the last 15 minutes.
     Labels: severity=critical, namespace=production, pod=api-server
-  targetNamespaces:
-    - production
   tools:
     skills:
       - # TODO: Replace with Konflux-built image when available for https://github.com/openshift/agentic-skills
@@ -48,8 +46,6 @@ spec:
     AlertManager alert fired: DiskSpaceWarning (warning)
     Node worker-3 disk usage at 85%.
     Labels: severity=warning, node=worker-3
-  targetNamespaces:
-    - openshift-lightspeed
   tools:
     skills:
       - # TODO: Replace with Konflux-built image when available for https://github.com/openshift/agentic-skills

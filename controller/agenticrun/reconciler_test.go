@@ -441,12 +441,11 @@ func testAgenticRun() *agenticv1alpha1.AgenticRun {
 	return &agenticv1alpha1.AgenticRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "fix-crash", Namespace: "default"},
 		Spec: agenticv1alpha1.AgenticRunSpec{
-			Request:          "Pod crashing in production",
-			Tools:            testTools(),
-			TargetNamespaces: []string{"production"},
-			Analysis:         agenticv1alpha1.AgenticRunStep{Agent: "default"},
-			Execution:        agenticv1alpha1.AgenticRunStep{Agent: "default"},
-			Verification:     agenticv1alpha1.AgenticRunStep{Agent: "default"},
+			Request:      "Pod crashing in production",
+			Tools:        testTools(),
+			Analysis:     agenticv1alpha1.AgenticRunStep{Agent: "default"},
+			Execution:    agenticv1alpha1.AgenticRunStep{Agent: "default"},
+			Verification: agenticv1alpha1.AgenticRunStep{Agent: "default"},
 		},
 	}
 }

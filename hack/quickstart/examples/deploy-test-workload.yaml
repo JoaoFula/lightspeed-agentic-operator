@@ -22,8 +22,6 @@ spec:
     2. Execution: Create a Deployment named "hello-test" running nginx:latest
        with 1 replica, and a ClusterIP Service named "hello-test" on port 80.
        Verify the pod reaches Running state.
-  targetNamespaces:
-    - openshift-lightspeed
   analysis:
     agent: default
   execution:

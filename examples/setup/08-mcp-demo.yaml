@@ -22,8 +22,6 @@ spec:
     1. List all nodes and report their status
     2. List pods in the openshift-lightspeed namespace
     3. Summarize what you found
-  targetNamespaces:
-    - openshift-lightspeed
   tools:
     skills:
       - # TODO: Replace with Konflux-built image when available for https://github.com/openshift/agentic-skills

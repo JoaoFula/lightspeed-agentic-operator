@@ -103,10 +103,9 @@ func TestReconcile_WorkflowVariants(t *testing.T) {
 			run: &agenticv1alpha1.AgenticRun{
 				ObjectMeta: metav1.ObjectMeta{Name: "fix-crash", Namespace: "default"},
 				Spec: agenticv1alpha1.AgenticRunSpec{
-					Request:          "Investigate issue",
-					Tools:            testTools(),
-					TargetNamespaces: []string{"production"},
-					Analysis:         agenticv1alpha1.AgenticRunStep{Agent: "default"},
+					Request:  "Investigate issue",
+					Tools:    testTools(),
+					Analysis: agenticv1alpha1.AgenticRunStep{Agent: "default"},
 				},
 			},
 			wantPhase: agenticv1alpha1.AgenticRunPhaseCompleted,
@@ -116,11 +115,10 @@ func TestReconcile_WorkflowVariants(t *testing.T) {
 			run: &agenticv1alpha1.AgenticRun{
 				ObjectMeta: metav1.ObjectMeta{Name: "fix-crash", Namespace: "default"},
 				Spec: agenticv1alpha1.AgenticRunSpec{
-					Request:          "Fix with manual apply",
-					Tools:            testTools(),
-					TargetNamespaces: []string{"production"},
-					Analysis:         agenticv1alpha1.AgenticRunStep{Agent: "default"},
-					Verification:     agenticv1alpha1.AgenticRunStep{Agent: "default"},
+					Request:      "Fix with manual apply",
+					Tools:        testTools(),
+					Analysis:     agenticv1alpha1.AgenticRunStep{Agent: "default"},
+					Verification: agenticv1alpha1.AgenticRunStep{Agent: "default"},
 				},
 			},
 			wantPhase: agenticv1alpha1.AgenticRunPhaseVerifying,
@@ -130,11 +128,10 @@ func TestReconcile_WorkflowVariants(t *testing.T) {
 			run: &agenticv1alpha1.AgenticRun{
 				ObjectMeta: metav1.ObjectMeta{Name: "fix-crash", Namespace: "default"},
 				Spec: agenticv1alpha1.AgenticRunSpec{
-					Request:          "Trust mode fix",
-					Tools:            testTools(),
-					TargetNamespaces: []string{"production"},
-					Analysis:         agenticv1alpha1.AgenticRunStep{Agent: "default"},
-					Execution:        agenticv1alpha1.AgenticRunStep{Agent: "default"},
+					Request:   "Trust mode fix",
+					Tools:     testTools(),
+					Analysis:  agenticv1alpha1.AgenticRunStep{Agent: "default"},
+					Execution: agenticv1alpha1.AgenticRunStep{Agent: "default"},
 				},
 			},
 			wantPhase: agenticv1alpha1.AgenticRunPhaseCompleted,
@@ -711,10 +708,9 @@ func TestReconcile_RevisionFromCompleted(t *testing.T) {
 	run := &agenticv1alpha1.AgenticRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "fix-crash", Namespace: "default"},
 		Spec: agenticv1alpha1.AgenticRunSpec{
-			Request:          "Investigate issue",
-			Tools:            testTools(),
-			TargetNamespaces: []string{"production"},
-			Analysis:         agenticv1alpha1.AgenticRunStep{Agent: "default"},
+			Request:  "Investigate issue",
+			Tools:    testTools(),
+			Analysis: agenticv1alpha1.AgenticRunStep{Agent: "default"},
 		},
 	}
 
@@ -766,10 +762,9 @@ func TestReconcile_RevisionClearsTerminalTime(t *testing.T) {
 	run := &agenticv1alpha1.AgenticRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "fix-crash", Namespace: "default"},
 		Spec: agenticv1alpha1.AgenticRunSpec{
-			Request:          "Investigate issue",
-			Tools:            testTools(),
-			TargetNamespaces: []string{"production"},
-			Analysis:         agenticv1alpha1.AgenticRunStep{Agent: "default"},
+			Request:  "Investigate issue",
+			Tools:    testTools(),
+			Analysis: agenticv1alpha1.AgenticRunStep{Agent: "default"},
 		},
 	}
 
@@ -835,10 +830,9 @@ func TestReconcile_RevisionFromFailed(t *testing.T) {
 	run := &agenticv1alpha1.AgenticRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "fix-crash", Namespace: "default"},
 		Spec: agenticv1alpha1.AgenticRunSpec{
-			Request:          "Investigate issue",
-			Tools:            testTools(),
-			TargetNamespaces: []string{"production"},
-			Analysis:         agenticv1alpha1.AgenticRunStep{Agent: "default"},
+			Request:  "Investigate issue",
+			Tools:    testTools(),
+			Analysis: agenticv1alpha1.AgenticRunStep{Agent: "default"},
 		},
 	}
 

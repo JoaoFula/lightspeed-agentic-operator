@@ -30,8 +30,7 @@ func TestPreserveSandboxAnnotationKeepsFailedPod(t *testing.T) {
 			},
 		},
 		Spec: agenticv1alpha1.AgenticRunSpec{
-			Request:          "MOCK_CRASH",
-			TargetNamespaces: []string{"staging"},
+			Request: "MOCK_CRASH",
 			Tools: agenticv1alpha1.ToolsSpec{Skills: []agenticv1alpha1.SkillsSource{{
 				Image: "quay.io/openshift-lightspeed/ols-qe:lightspeed-mock-agent",
 				Paths: []string{"/skills"},

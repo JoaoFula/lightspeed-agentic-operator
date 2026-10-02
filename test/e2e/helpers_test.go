@@ -164,7 +164,7 @@ func cleanup(t *testing.T, c client.Client, objs ...client.Object) {
 // runs, and registers cleanup. Returns the created AgenticRun.
 func createAgenticRun(t *testing.T, c client.Client, name string) *agenticv1alpha1.AgenticRun {
 	t.Helper()
-	return createAgenticRunWithRequest(t, c, name, "Pod crash-looping in staging namespace")
+	return createAgenticRunWithRequest(t, c, name, "Pod crash-looping in default namespace")
 }
 
 // createAgenticRunWithRequest is like createAgenticRun but allows a custom
@@ -182,12 +182,11 @@ func createAgenticRunWithSkills(t *testing.T, c client.Client, name, request, im
 	prop := &agenticv1alpha1.AgenticRun{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS},
 		Spec: agenticv1alpha1.AgenticRunSpec{
-			Request:          request,
-			TargetNamespaces: []string{"staging"},
-			Tools:            agenticv1alpha1.ToolsSpec{Skills: []agenticv1alpha1.SkillsSource{{Image: image, Paths: []string{skillPath}}}},
-			Analysis:         agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
-			Execution:        agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
-			Verification:     agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
+			Request:      request,
+			Tools:        agenticv1alpha1.ToolsSpec{Skills: []agenticv1alpha1.SkillsSource{{Image: image, Paths: []string{skillPath}}}},
+			Analysis:     agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
+			Execution:    agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
+			Verification: agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
 		},
 	}
 
@@ -508,9 +507,8 @@ type evalsExpectedStatus struct {
 }
 
 type evalsProposalSpec struct {
-	Request          string         `yaml:"request"`
-	TargetNamespaces []string       `yaml:"targetNamespaces"`
-	Tools            evalsToolsSpec `yaml:"tools"`
+	Request string         `yaml:"request"`
+	Tools   evalsToolsSpec `yaml:"tools"`
 }
 
 type evalsToolsSpec struct {

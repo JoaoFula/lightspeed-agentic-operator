@@ -13,11 +13,10 @@ import (
 )
 
 type CreateOptions struct {
-	configFlags      *genericclioptions.ConfigFlags
-	agent            string
-	request          string
-	targetNamespaces []string
-	output           string
+	configFlags *genericclioptions.ConfigFlags
+	agent       string
+	request     string
+	output      string
 
 	client    client.Client
 	namespace string
@@ -53,7 +52,6 @@ func NewCreateCmd(streams genericclioptions.IOStreams) *cobra.Command {
 	o.configFlags.AddFlags(cmd.Flags())
 	cmd.Flags().StringVar(&o.agent, "agent", "default", "Agent CR name for the analysis step")
 	cmd.Flags().StringVar(&o.request, "request", "", "Description of what to do (required)")
-	cmd.Flags().StringSliceVar(&o.targetNamespaces, "target-namespaces", nil, "Target namespace(s), comma-separated")
 	cmd.Flags().StringVarP(&o.output, "output", "o", "", "Output format: json or yaml")
 
 	_ = cmd.MarkFlagRequired("request")
@@ -85,8 +83,7 @@ func (o *CreateOptions) Run(ctx context.Context) error {
 			Namespace:    o.namespace,
 		},
 		Spec: agenticv1alpha1.AgenticRunSpec{
-			Request:          o.request,
-			TargetNamespaces: o.targetNamespaces,
+			Request: o.request,
 			Analysis: agenticv1alpha1.AgenticRunStep{
 				Agent: o.agent,
 			},

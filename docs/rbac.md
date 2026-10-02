@@ -70,7 +70,7 @@ subjects:
 
 **Note:** The `lightspeed-agent` ServiceAccount is created by the operator at startup (idempotent). It is the discovery seed — all per-step SAs are dynamically added to (and removed from) these ClusterRoleBindings by `SandboxManager.Create` and `Release`.
 
-**Scope decision:** Cluster-wide read is shown above. For tighter security, use per-namespace Roles binding only to `targetNamespaces` the AgenticRun references — but this requires dynamic admin action per namespace.
+**Scope decision:** Cluster-wide read is shown above. Execution Roles are scoped to the namespaces declared by the approved remediation option's namespace-scoped RBAC rules.
 
 ### 2. Operator escalation privilege
 

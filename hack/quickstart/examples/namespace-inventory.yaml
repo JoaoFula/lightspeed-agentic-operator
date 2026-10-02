@@ -17,8 +17,6 @@ spec:
     its current status, and flag any problems (CrashLoopBackOff,
     ImagePullBackOff, Pending, restarts, etc.). Propose remediation
     for any issues found.
-  targetNamespaces:
-    - openshift-lightspeed
   analysis:
     agent: default
   execution:

@@ -9,6 +9,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+func TestCreateCommand_DoesNotExposeTargetNamespacesFlag(t *testing.T) {
+	streams, _, _ := fakeStreams()
+	cmd := NewCreateCmd(streams)
+	if cmd.Flags().Lookup("target-namespaces") != nil {
+		t.Fatal("create command must not expose --target-namespaces")
+	}
+}
+
 func TestCreate_Success(t *testing.T) {
 	streams, out, _ := fakeStreams()
 	fc := fake.NewClientBuilder().WithScheme(testScheme()).Build()
@@ -49,32 +57,6 @@ func TestCreate_GenerateNamePrefix(t *testing.T) {
 	output := out.String()
 	if !strings.Contains(output, "run/") {
 		t.Errorf("expected run/ prefix in output, got: %s", output)
-	}
-}
-
-func TestCreate_WithTargetNamespaces(t *testing.T) {
-	streams, _, _ := fakeStreams()
-	fc := fake.NewClientBuilder().WithScheme(testScheme()).Build()
-
-	o := &CreateOptions{
-		client:           fc,
-		namespace:        "default",
-		agent:            "smart",
-		request:          "Pod crashing",
-		targetNamespaces: []string{"prod", "staging"},
-		IOStreams:        streams,
-	}
-	if err := o.Run(context.Background()); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	list := &agenticv1alpha1.AgenticRunList{}
-	if err := fc.List(context.Background(), list); err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	ns := list.Items[0].Spec.TargetNamespaces
-	if len(ns) != 2 || ns[0] != "prod" || ns[1] != "staging" {
-		t.Errorf("expected target namespaces [prod, staging], got %v", ns)
 	}
 }
 

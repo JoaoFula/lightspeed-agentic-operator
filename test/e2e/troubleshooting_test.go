@@ -79,7 +79,7 @@ func TestTroubleshooting_PhaseTransitions(t *testing.T) {
 			}
 
 			runName := fmt.Sprintf("e2e-ts-%s", strings.ReplaceAll(sc.Name, "_", "-"))
-			run := createTroubleshootingRun(t, c, runName, sc.Spec.Request, sc.Spec.TargetNamespaces, tools)
+			run := createTroubleshootingRun(t, c, runName, sc.Spec.Request, tools)
 			// Registered after createTroubleshootingRun's cleanup, so this runs
 			// first and exports templogs before the AgenticRun finalizer deletes
 			// them from the collector.
@@ -107,19 +107,18 @@ func TestTroubleshooting_PhaseTransitions(t *testing.T) {
 	}
 }
 
-func createTroubleshootingRun(t *testing.T, c client.Client, name, request string, targetNamespaces []string, tools agenticv1alpha1.ToolsSpec) *agenticv1alpha1.AgenticRun {
+func createTroubleshootingRun(t *testing.T, c client.Client, name, request string, tools agenticv1alpha1.ToolsSpec) *agenticv1alpha1.AgenticRun {
 	t.Helper()
 	ctx := context.Background()
 
 	run := &agenticv1alpha1.AgenticRun{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS},
 		Spec: agenticv1alpha1.AgenticRunSpec{
-			Request:          request,
-			TargetNamespaces: targetNamespaces,
-			Tools:            tools,
-			Analysis:         agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
-			Execution:        agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
-			Verification:     agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
+			Request:      request,
+			Tools:        tools,
+			Analysis:     agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
+			Execution:    agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
+			Verification: agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
 		},
 	}
 

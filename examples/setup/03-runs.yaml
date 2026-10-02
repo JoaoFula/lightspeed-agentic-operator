@@ -8,8 +8,6 @@ metadata:
   namespace: openshift-lightspeed
 spec:
   request: "Pod api-server-xyz is crash looping in production namespace"
-  targetNamespaces:
-    - production
   tools:
     skills:
       - # TODO: Replace with Konflux-built image when available for https://github.com/openshift/agentic-skills
@@ -38,8 +36,6 @@ metadata:
   namespace: openshift-lightspeed
 spec:
   request: "High memory usage detected in staging — recommend resource limit changes"
-  targetNamespaces:
-    - staging
   tools:
     skills:
       - # TODO: Replace with Konflux-built image when available for https://github.com/openshift/agentic-skills
@@ -59,8 +55,6 @@ metadata:
   namespace: openshift-lightspeed
 spec:
   request: "Investigate intermittent 503 errors on the api-gateway service"
-  targetNamespaces:
-    - production
   tools:
     skills:
       - # TODO: Replace with Konflux-built image when available for https://github.com/openshift/agentic-skills
@@ -78,8 +72,6 @@ metadata:
   namespace: openshift-lightspeed
 spec:
   request: "Investigate why pod foo is crashlooping"
-  targetNamespaces:
-    - production
   tools:
     skills:
       - # TODO: Replace with Konflux-built image when available for https://github.com/openshift/agentic-skills
@@ -97,8 +89,6 @@ metadata:
   namespace: openshift-lightspeed
 spec:
   request: "Fix OOM kills in the payments service"
-  targetNamespaces:
-    - production
   tools:
     skills:
       - # TODO: Replace with Konflux-built image when available for https://github.com/openshift/agentic-skills

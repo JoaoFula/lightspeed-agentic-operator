@@ -143,6 +143,6 @@ Install the `oc-agentic` CLI plugin to manage agenticruns from the command line
 
 ```bash
 oc agentic version
-oc agentic run create --request="Deploy a test nginx workload" --target-namespaces=default
+oc agentic run create --request="Deploy a test nginx workload in the default namespace"
 oc agentic run list
 ```

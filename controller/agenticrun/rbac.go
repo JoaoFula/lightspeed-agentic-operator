@@ -376,8 +376,7 @@ func ensureExecutionRBAC(
 	}}
 
 	if len(rbacResult.NamespaceScoped) > 0 {
-		nsRules := rbacRulesToPolicyRules(rbacResult.NamespaceScoped)
-		targetNS := rbacTargetNamespaces(run, rbacResult)
+		targetNS := rbacTargetNamespaces(rbacResult)
 
 		if len(targetNS) > 0 {
 			if run.Annotations == nil {
@@ -387,9 +386,16 @@ func ensureExecutionRBAC(
 		}
 
 		for _, ns := range targetNS {
+			var nsRules []agenticv1alpha1.RBACRule
+			for _, rule := range rbacResult.NamespaceScoped {
+				if rule.Namespace == ns {
+					nsRules = append(nsRules, rule)
+				}
+			}
+
 			role := &rbacv1.Role{
 				ObjectMeta: metav1.ObjectMeta{Name: roleName, Namespace: ns, Labels: labels},
-				Rules:      nsRules,
+				Rules:      rbacRulesToPolicyRules(nsRules),
 			}
 			if err := c.Create(ctx, role); err != nil && !apierrors.IsAlreadyExists(err) {
 				return fmt.Errorf("%s %s: %w", ErrCreateRole, ns, err)
@@ -473,10 +479,7 @@ func deleteIfExists(ctx context.Context, c client.Client, obj client.Object) err
 	return nil
 }
 
-func rbacTargetNamespaces(run *agenticv1alpha1.AgenticRun, rbacResult *agenticv1alpha1.RBACResult) []string {
-	if len(run.Spec.TargetNamespaces) > 0 {
-		return run.Spec.TargetNamespaces
-	}
+func rbacTargetNamespaces(rbacResult *agenticv1alpha1.RBACResult) []string {
 	if rbacResult == nil {
 		return nil
 	}

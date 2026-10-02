@@ -238,15 +238,6 @@ func TestSandboxAgentCaller_ReleaseSandboxes_PartialError(t *testing.T) {
 	}
 }
 
-func TestBuildAgentContext_TargetNamespaces(t *testing.T) {
-	run := testSandboxAgenticRun()
-	run.Spec.TargetNamespaces = []string{"payments", "frontend"}
-	ctx := buildAgentContext(run)
-	if len(ctx.TargetNamespaces) != 2 || ctx.TargetNamespaces[0] != "payments" {
-		t.Errorf("expected target namespaces [payments frontend], got %v", ctx.TargetNamespaces)
-	}
-}
-
 func TestBuildAgentContext_PreviousAttempts(t *testing.T) {
 	run := testSandboxAgenticRun()
 	run.Status.Steps.Execution.Results = []agenticv1alpha1.StepResultRef{

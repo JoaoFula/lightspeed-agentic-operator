@@ -150,8 +150,8 @@ func TestList_WideOutput(t *testing.T) {
 	}
 
 	output := out.String()
-	if !strings.Contains(output, "TARGET-NS") {
-		t.Error("wide output should contain TARGET-NS header")
+	if strings.Contains(output, "TARGET-NS") {
+		t.Error("wide output must not contain the removed TARGET-NS column")
 	}
 }
 

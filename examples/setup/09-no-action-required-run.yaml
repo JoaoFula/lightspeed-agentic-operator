@@ -28,8 +28,6 @@ metadata:
   namespace: openshift-lightspeed
 spec:
   request: "Pod hello-printer is crash looping in openshift-lightspeed namespace"
-  targetNamespaces:
-    - openshift-lightspeed
   analysis:
     agent: default
   execution:
