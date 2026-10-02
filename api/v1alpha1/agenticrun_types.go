@@ -278,7 +278,6 @@ func (s AgenticRunStep) IsZero() bool {
 // Omit execution and/or verification to skip those steps.
 //
 // +kubebuilder:validation:XValidation:rule="has(self.analysis)",message="analysis must be provided"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.targetNamespaces) || (has(self.targetNamespaces) && self.targetNamespaces == oldSelf.targetNamespaces)",message="targetNamespaces is immutable once set"
 // +kubebuilder:validation:XValidation:rule="has(self.targetCluster) == has(oldSelf.targetCluster) && (!has(self.targetCluster) || self.targetCluster == oldSelf.targetCluster)",message="targetCluster is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.analysisOutput) || (has(self.analysisOutput) && self.analysisOutput == oldSelf.analysisOutput)",message="analysisOutput is immutable once set"
 // +kubebuilder:validation:XValidation:rule="!has(self.analysisOutput) || self.analysisOutput.mode != 'Minimal' || (!has(self.execution) && !has(self.verification))",message="analysisOutput mode Minimal is only allowed for analysis-only runs (no execution or verification steps)"
@@ -300,33 +299,13 @@ type AgenticRunSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="request is immutable after creation"
 	Request string `json:"request,omitempty"`
 
-	// targetNamespaces are the Kubernetes namespace(s) this agentic run
-	// operates on. Used for RBAC scoping and context to the analysis agent.
-	//
-	// When omitted, the run is not namespace-scoped — the analysis
-	// agent determines the relevant namespaces from the request context.
-	// Adapters (AlertManager, ACS) typically set this automatically from
-	// the source event.
-	//
-	// Immutable: RBAC scoping is fixed at creation. Changing target
-	// namespaces mid-flight would invalidate the analysis and any
-	// granted execution RBAC.
-	// +optional
-	// +listType=atomic
-	// +kubebuilder:validation:MinItems=1
-	// +kubebuilder:validation:MaxItems=50
-	// +kubebuilder:validation:XValidation:rule="self.all(ns, !format.dns1123Label().validate(ns).hasValue())",message="each namespace must be a valid DNS label"
-	// +kubebuilder:validation:items:MinLength=1
-	// +kubebuilder:validation:items:MaxLength=63
-	TargetNamespaces []string `json:"targetNamespaces,omitempty"`
-
 	// targetCluster optionally references a spoke cluster by name.
 	// When set, the operator creates ephemeral service accounts and
 	// RBAC on the spoke cluster via the standing kubeconfig Secret
 	// (spoke-kubeconfig-{targetCluster}). When empty, the run
 	// targets the local (hub) cluster.
 	//
-	// Immutable: RBAC scoping is fixed at creation.
+	// Immutable: the cluster target is fixed at creation.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=236
@@ -465,8 +444,6 @@ type AgenticRunStatus struct {
 //	  name: one-off-investigation
 //	spec:
 //	  request: "Investigate why pod foo is crashlooping"
-//	  targetNamespaces:
-//	    - lightspeed-demo
 //	  tools:
 //	    skills:
 //	      - image: registry.redhat.io/acs/acs-agentic-skills:latest
@@ -482,8 +459,6 @@ type AgenticRunStatus struct {
 //	  namespace: stackrox
 //	spec:
 //	  request: "Fix CVE-2024-1234 in nginx:1.21"
-//	  targetNamespaces:
-//	    - lightspeed-demo
 //	  tools:
 //	    skills:
 //	      - image: registry.redhat.io/acs/acs-agentic-skills:latest

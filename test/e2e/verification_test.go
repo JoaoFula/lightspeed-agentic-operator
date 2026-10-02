@@ -107,7 +107,7 @@ func TestVerificationFlow_VerifyingToCompleted(t *testing.T) {
 	waitForDeletion(t, c, prop.Name)
 
 	var role rbacv1.Role
-	if err := c.Get(ctx, types.NamespacedName{Name: roleName, Namespace: "staging"}, &role); err == nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: roleName, Namespace: "default"}, &role); err == nil {
 		t.Errorf("Role %s still exists after deletion — RBAC not cleaned up", roleName)
 	}
 	t.Log("Verified: RBAC cleaned up after deletion")

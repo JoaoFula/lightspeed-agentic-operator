@@ -27,9 +27,8 @@ func testAgenticRun(name, namespace string) *agenticv1alpha1.AgenticRun {
 			CreationTimestamp: metav1.Now(),
 		},
 		Spec: agenticv1alpha1.AgenticRunSpec{
-			Request:          "Pod crashing in production",
-			TargetNamespaces: []string{"production"},
-			Analysis:         agenticv1alpha1.AgenticRunStep{Agent: "default"},
+			Request:  "Pod crashing in production",
+			Analysis: agenticv1alpha1.AgenticRunStep{Agent: "default"},
 		},
 	}
 }

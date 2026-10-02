@@ -51,10 +51,10 @@ func TestEnsureExecutionRBAC_NamespaceScopedOnly(t *testing.T) {
 
 	run := &agenticv1alpha1.AgenticRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "fix-oom", Namespace: "app-ns", UID: "uid-fix-oom"},
-		Spec:       agenticv1alpha1.AgenticRunSpec{TargetNamespaces: []string{"production"}},
 	}
 	rbacResult := &agenticv1alpha1.RBACResult{
 		NamespaceScoped: []agenticv1alpha1.RBACRule{{
+			Namespace:     "production",
 			APIGroups:     []string{"apps"},
 			Resources:     []string{"deployments"},
 			Verbs:         []string{"get", "patch"},
@@ -87,6 +87,13 @@ func TestEnsureExecutionRBAC_NamespaceScopedOnly(t *testing.T) {
 	}
 	if role.Labels[LabelComponent] != "execution-rbac" {
 		t.Fatalf("missing component label")
+	}
+
+	var unrelatedRole rbacv1.Role
+	if err := fc.Get(ctx, types.NamespacedName{Name: roleName, Namespace: "unrelated-ns"}, &unrelatedRole); err == nil {
+		t.Fatal("Role must not be created in an unrelated namespace")
+	} else if !apierrors.IsNotFound(err) {
+		t.Fatalf("get Role from unrelated namespace: %v", err)
 	}
 
 	// Verify RoleBinding
@@ -172,10 +179,10 @@ func TestEnsureExecutionRBAC_BothScopes(t *testing.T) {
 
 	run := &agenticv1alpha1.AgenticRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "full-fix", Namespace: "default", UID: "uid-full-fix"},
-		Spec:       agenticv1alpha1.AgenticRunSpec{TargetNamespaces: []string{"staging"}},
 	}
 	rbacResult := &agenticv1alpha1.RBACResult{
 		NamespaceScoped: []agenticv1alpha1.RBACRule{{
+			Namespace: "staging",
 			APIGroups: []string{"apps"}, Resources: []string{"deployments"},
 			Verbs: []string{"get", "patch"}, Justification: "Patch deploy",
 		}},
@@ -209,13 +216,13 @@ func TestEnsureExecutionRBAC_MultipleNamespaces(t *testing.T) {
 
 	run := &agenticv1alpha1.AgenticRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "multi-ns", Namespace: "default", UID: "uid-multi-ns"},
-		Spec:       agenticv1alpha1.AgenticRunSpec{TargetNamespaces: []string{"ns-a", "ns-b", "ns-c"}},
 	}
 	rbacResult := &agenticv1alpha1.RBACResult{
-		NamespaceScoped: []agenticv1alpha1.RBACRule{{
-			APIGroups: []string{""}, Resources: []string{"pods"},
-			Verbs: []string{"get", "delete"}, Justification: "Restart pod",
-		}},
+		NamespaceScoped: []agenticv1alpha1.RBACRule{
+			{Namespace: "ns-a", APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "delete"}, Justification: "Restart pod"},
+			{Namespace: "ns-b", APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "delete"}, Justification: "Restart pod"},
+			{Namespace: "ns-c", APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "delete"}, Justification: "Restart pod"},
+		},
 	}
 
 	if err := ensureExecutionRBAC(ctx, fc, run, rbacResult, "default", nil); err != nil {
@@ -248,10 +255,10 @@ func TestEnsureExecutionRBAC_Idempotent(t *testing.T) {
 
 	run := &agenticv1alpha1.AgenticRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "idem", Namespace: "default", UID: "uid-idem"},
-		Spec:       agenticv1alpha1.AgenticRunSpec{TargetNamespaces: []string{"prod"}},
 	}
 	rbacResult := &agenticv1alpha1.RBACResult{
 		NamespaceScoped: []agenticv1alpha1.RBACRule{{
+			Namespace: "prod",
 			APIGroups: []string{"apps"}, Resources: []string{"deployments"},
 			Verbs: []string{"get"}, Justification: "Read deploy",
 		}},
@@ -290,7 +297,6 @@ func TestEnsureExecutionRBAC_EmptyRules(t *testing.T) {
 
 	run := &agenticv1alpha1.AgenticRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "empty-rules", Namespace: "default", UID: "uid-empty-rules"},
-		Spec:       agenticv1alpha1.AgenticRunSpec{TargetNamespaces: []string{"prod"}},
 	}
 	rbacResult := &agenticv1alpha1.RBACResult{}
 
@@ -327,10 +333,22 @@ func TestEnsureExecutionRBAC_NamespacesFromRBACRules(t *testing.T) {
 	}
 
 	roleName := executionRoleName("uid-ns-from-rules")
-	for _, ns := range []string{"app-ns", "data-ns"} {
+	for _, tc := range []struct {
+		namespace    string
+		wantResource string
+	}{
+		{namespace: ns1, wantResource: "pods"},
+		{namespace: ns2, wantResource: "services"},
+	} {
 		var role rbacv1.Role
-		if err := fc.Get(ctx, types.NamespacedName{Name: roleName, Namespace: ns}, &role); err != nil {
-			t.Fatalf("Role not found in %s: %v", ns, err)
+		if err := fc.Get(ctx, types.NamespacedName{Name: roleName, Namespace: tc.namespace}, &role); err != nil {
+			t.Fatalf("Role not found in %s: %v", tc.namespace, err)
+		}
+		if len(role.Rules) != 1 {
+			t.Fatalf("Role in %s has %d rules, want 1 rule scoped to that namespace", tc.namespace, len(role.Rules))
+		}
+		if len(role.Rules[0].Resources) != 1 || role.Rules[0].Resources[0] != tc.wantResource {
+			t.Errorf("Role in %s grants resources %v, want only %q", tc.namespace, role.Rules[0].Resources, tc.wantResource)
 		}
 	}
 }
@@ -342,10 +360,10 @@ func TestEnsureExecutionRBAC_ResourceNames(t *testing.T) {
 
 	run := &agenticv1alpha1.AgenticRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "with-names", Namespace: "default", UID: "uid-with-names"},
-		Spec:       agenticv1alpha1.AgenticRunSpec{TargetNamespaces: []string{"prod"}},
 	}
 	rbacResult := &agenticv1alpha1.RBACResult{
 		NamespaceScoped: []agenticv1alpha1.RBACRule{{
+			Namespace:     "prod",
 			APIGroups:     []string{"apps"},
 			Resources:     []string{"deployments"},
 			ResourceNames: []string{"web-frontend"},
@@ -383,13 +401,12 @@ func TestCleanupExecutionRBAC_NamespaceAndCluster(t *testing.T) {
 			UID:         "uid-cleanup-test",
 			Annotations: map[string]string{rbacNamespacesAnnotation: "ns-a,ns-b"},
 		},
-		Spec: agenticv1alpha1.AgenticRunSpec{TargetNamespaces: []string{"ns-a", "ns-b"}},
 	}
 	rbacResult := &agenticv1alpha1.RBACResult{
-		NamespaceScoped: []agenticv1alpha1.RBACRule{{
-			APIGroups: []string{"apps"}, Resources: []string{"deployments"},
-			Verbs: []string{"get"}, Justification: "Read",
-		}},
+		NamespaceScoped: []agenticv1alpha1.RBACRule{
+			{Namespace: "ns-a", APIGroups: []string{"apps"}, Resources: []string{"deployments"}, Verbs: []string{"get"}, Justification: "Read"},
+			{Namespace: "ns-b", APIGroups: []string{"apps"}, Resources: []string{"deployments"}, Verbs: []string{"get"}, Justification: "Read"},
+		},
 		ClusterScoped: []agenticv1alpha1.RBACRule{{
 			APIGroups: []string{""}, Resources: []string{"nodes"},
 			Verbs: []string{"get"}, Justification: "Read nodes",
@@ -742,21 +759,8 @@ func TestRBACTargetNamespaces(t *testing.T) {
 	ns1 := "ns-alpha"
 	ns2 := "ns-beta"
 
-	t.Run("from_spec", func(t *testing.T) {
-		run := &agenticv1alpha1.AgenticRun{
-			Spec: agenticv1alpha1.AgenticRunSpec{TargetNamespaces: []string{"prod", "staging"}},
-		}
-		got := rbacTargetNamespaces(run, &agenticv1alpha1.RBACResult{
-			NamespaceScoped: []agenticv1alpha1.RBACRule{{Namespace: ns1}},
-		})
-		if len(got) != 2 || got[0] != "prod" || got[1] != "staging" {
-			t.Fatalf("spec namespaces should take precedence: %v", got)
-		}
-	})
-
 	t.Run("from_rbac_rules", func(t *testing.T) {
-		run := &agenticv1alpha1.AgenticRun{}
-		got := rbacTargetNamespaces(run, &agenticv1alpha1.RBACResult{
+		got := rbacTargetNamespaces(&agenticv1alpha1.RBACResult{
 			NamespaceScoped: []agenticv1alpha1.RBACRule{
 				{Namespace: ns1},
 				{Namespace: ns2},
@@ -768,30 +772,27 @@ func TestRBACTargetNamespaces(t *testing.T) {
 	})
 
 	t.Run("dedup", func(t *testing.T) {
-		run := &agenticv1alpha1.AgenticRun{}
-		got := rbacTargetNamespaces(run, &agenticv1alpha1.RBACResult{
+		got := rbacTargetNamespaces(&agenticv1alpha1.RBACResult{
 			NamespaceScoped: []agenticv1alpha1.RBACRule{
 				{Namespace: ns1},
 				{Namespace: ns1},
 				{Namespace: ns2},
 			},
 		})
-		if len(got) != 2 {
-			t.Fatalf("should dedup: got %v", got)
+		if len(got) != 2 || got[0] != ns1 || got[1] != ns2 {
+			t.Fatalf("should preserve unique namespace order [%s %s], got %v", ns1, ns2, got)
 		}
 	})
 
 	t.Run("nil_rbac", func(t *testing.T) {
-		run := &agenticv1alpha1.AgenticRun{}
-		got := rbacTargetNamespaces(run, nil)
+		got := rbacTargetNamespaces(nil)
 		if got != nil {
 			t.Fatalf("should be nil for nil rbac: %v", got)
 		}
 	})
 
 	t.Run("nil_namespace_in_rule", func(t *testing.T) {
-		run := &agenticv1alpha1.AgenticRun{}
-		got := rbacTargetNamespaces(run, &agenticv1alpha1.RBACResult{
+		got := rbacTargetNamespaces(&agenticv1alpha1.RBACResult{
 			NamespaceScoped: []agenticv1alpha1.RBACRule{
 				{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get"}},
 			},
@@ -802,12 +803,8 @@ func TestRBACTargetNamespaces(t *testing.T) {
 	})
 
 	t.Run("empty_namespace_in_rule", func(t *testing.T) {
-		empty := ""
-		run := &agenticv1alpha1.AgenticRun{}
-		got := rbacTargetNamespaces(run, &agenticv1alpha1.RBACResult{
-			NamespaceScoped: []agenticv1alpha1.RBACRule{
-				{Namespace: empty},
-			},
+		got := rbacTargetNamespaces(&agenticv1alpha1.RBACResult{
+			NamespaceScoped: []agenticv1alpha1.RBACRule{{Namespace: ""}},
 		})
 		if len(got) != 0 {
 			t.Fatalf("empty namespace should be skipped: %v", got)
@@ -1646,12 +1643,12 @@ func TestEnsureExecutionRBAC_SpokeLabels(t *testing.T) {
 	run := &agenticv1alpha1.AgenticRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "spoke-run", Namespace: "ns", UID: "uid-spoke"},
 		Spec: agenticv1alpha1.AgenticRunSpec{
-			TargetNamespaces: []string{"prod"},
-			TargetCluster:    "prod-spoke",
+			TargetCluster: "prod-spoke",
 		},
 	}
 	rbacResult := &agenticv1alpha1.RBACResult{
 		NamespaceScoped: []agenticv1alpha1.RBACRule{{
+			Namespace: "prod",
 			APIGroups: []string{"apps"},
 			Resources: []string{"deployments"},
 			Verbs:     []string{"get"},
@@ -1688,12 +1685,11 @@ func TestEnsureExecutionRBAC_NilExtraLabels(t *testing.T) {
 
 	run := &agenticv1alpha1.AgenticRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "hub-run", Namespace: "ns", UID: "uid-hub"},
-		Spec: agenticv1alpha1.AgenticRunSpec{
-			TargetNamespaces: []string{"prod"},
-		},
+		Spec:       agenticv1alpha1.AgenticRunSpec{},
 	}
 	rbacResult := &agenticv1alpha1.RBACResult{
 		NamespaceScoped: []agenticv1alpha1.RBACRule{{
+			Namespace: "prod",
 			APIGroups: []string{"apps"},
 			Resources: []string{"deployments"},
 			Verbs:     []string{"get"},

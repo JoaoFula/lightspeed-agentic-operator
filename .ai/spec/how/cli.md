@@ -99,8 +99,8 @@ There is **no** unstructured client for run CRUD in the main commands; only watc
 
 ## Per-command API behavior (concise)
 
-- **`create`:** Builds `AgenticRun` with `GenerateName: "ag-"`, `Spec.Request`, `TargetNamespaces`, `Analysis.Agent` from flag default `"default"`. `client.Create`. Output: line message or `-o json|yaml` via `MarshalOutput`.
-- **`list`:** `client.List` `AgenticRunList`, optional `client.InNamespace`, filter by `--phase` using `agenticv1alpha1.DerivePhase` on each item. Table via `PrintTable` + `ColoredPhase` + `HumanDuration`; `-o wide` adds target namespaces column; `-A` lists cluster-wide.
+- **`create`:** Builds `AgenticRun` with `GenerateName: "ag-"`, `Spec.Request`, and `Analysis.Agent` from flag default `"default"`. `client.Create`. Output: line message or `-o json|yaml` via `MarshalOutput`.
+- **`list`:** `client.List` `AgenticRunList`, optional `client.InNamespace`, filter by `--phase` using `agenticv1alpha1.DerivePhase` on each item. Table via `PrintTable` + `ColoredPhase` + `HumanDuration`; `-A` lists cluster-wide.
 - **`get`:** `client.Get` by name; human-readable sections from `Spec`, `Status.Steps`, and `Status.Conditions` (step summaries via `stepStatusFromConditions`).
 - **`approve`:** Loads `AgenticRun`; `getOrCreateApproval` (get or create `AgenticRunApproval` with owner ref — create path omits controller flags present in controller’s `ensureAgenticRunApproval`; operator reconciler may enrich). Builds `[]ApprovalStage` entries, `client.Patch(MergeFrom)` on approval. `--all` uses `pendingStages` derived from spec non-zero steps vs existing stage types. `--wait` delegates to `doWatch`.
 - **`deny`:** Requires existing `AgenticRunApproval`; appends denied stage with `ApprovalDecisionDenied`. `--stage` defaults via `nextPendingStage` walk order analysis → execution → verification.

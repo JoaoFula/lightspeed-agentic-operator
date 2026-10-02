@@ -22,8 +22,6 @@ spec:
     (5xx responses) over the last 10 minutes.
     Source workload: checkout-frontend
     Labels: severity=critical, destination_service=payment-service.istio-system.svc.cluster.local
-  targetNamespaces:
-    - istio-system
   tools:
     skills:
       - # TODO: Replace with Konflux-built image when available for https://github.com/openshift/agentic-skills
@@ -51,8 +49,6 @@ spec:
     Istio mTLS misconfiguration detected in namespace bookinfo.
     PeerAuthentication is set to STRICT but DestinationRule uses
     DISABLE for reviews service. Traffic may be blocked.
-  targetNamespaces:
-    - bookinfo
   tools:
     skills:
       - # TODO: Replace with Konflux-built image when available for https://github.com/openshift/agentic-skills

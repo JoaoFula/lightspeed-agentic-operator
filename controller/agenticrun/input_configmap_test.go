@@ -19,12 +19,13 @@ func TestBuildInputConfigMap(t *testing.T) {
 			UID:       types.UID("uid-aaaa-bbbb"),
 		},
 		Spec: agenticv1alpha1.AgenticRunSpec{
-			Request:          "analyze this",
-			TargetNamespaces: []string{"payments"},
+			Request: "analyze this",
 		},
 	}
 	schema := json.RawMessage(`{"type":"object"}`)
-	agentCtx := &agentContext{TargetNamespaces: []string{"payments"}}
+	agentCtx := &agentContext{
+		PreviousAttempts: []agentPreviousAttempt{{Attempt: 1, FailureReason: "retry"}},
+	}
 
 	cm, err := buildInputConfigMap("op-ns", run, "analysis", nil, schema, agentCtx)
 	if err != nil {
@@ -52,6 +53,17 @@ func TestBuildInputConfigMap(t *testing.T) {
 	}
 	if cm.Data[inputConfigMapKeySchema] != string(schema) {
 		t.Errorf("schema = %q", cm.Data[inputConfigMapKeySchema])
+	}
+
+	var contextPayload map[string]any
+	if err := json.Unmarshal([]byte(cm.Data[inputConfigMapKeyCtx]), &contextPayload); err != nil {
+		t.Fatalf("context JSON: %v", err)
+	}
+	if _, ok := contextPayload["targetNamespaces"]; ok {
+		t.Error("sandbox context must not include targetNamespaces")
+	}
+	if _, ok := contextPayload["previousAttempts"]; !ok {
+		t.Error("sandbox context must retain previousAttempts")
 	}
 
 	var tmpl map[string]any

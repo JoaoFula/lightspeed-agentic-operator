@@ -18,8 +18,6 @@ spec:
     ACS policy violation in ArgoCD-managed namespace.
     Affected deployment: production/nginx-frontend
     This namespace is managed by GitOps. Advise git repository changes only.
-  targetNamespaces:
-    - production
   tools:
     skills:
       - # TODO: Replace with Konflux-built image when available for https://github.com/openshift/agentic-skills
@@ -48,8 +46,6 @@ spec:
   request: |
     High memory usage in staging. Namespace managed by ArgoCD.
     Advise what git changes to make for resource limit adjustments.
-  targetNamespaces:
-    - staging
   tools:
     skills:
       - # TODO: Replace with Konflux-built image when available for https://github.com/openshift/agentic-skills

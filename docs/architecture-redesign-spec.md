@@ -157,7 +157,6 @@ With HTTP eliminated, the contract is a JSON document format with explicit versi
     "properties": { ... }
   },
   "context": {
-    "targetNamespaces": ["production"],
     "previousAttempts": [],
     "approvedOption": null
   },

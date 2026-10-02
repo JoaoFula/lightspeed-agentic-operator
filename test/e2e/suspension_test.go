@@ -103,9 +103,8 @@ func TestSuspension_AdmissionRejectsCreate(t *testing.T) {
 
 	name := "suspend-admission-blocked"
 	waitForSuspendedAdmissionReject(t, c, name, agenticv1alpha1.AgenticRunSpec{
-		Request:          "should be rejected by VAP",
-		TargetNamespaces: []string{"staging"},
-		Analysis:         agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
+		Request:  "should be rejected by VAP",
+		Analysis: agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
 	})
 
 	var got agenticv1alpha1.AgenticRun
@@ -147,9 +146,8 @@ func TestSuspension_AdmissionAllowsCreateWhenConfigAbsent(t *testing.T) {
 	// (parameterNotFoundAction Allow). A single-shot Create can still see a
 	// stale suspended param and flake.
 	waitForAdmissionAllow(t, c, "suspend-admission-absent-config", agenticv1alpha1.AgenticRunSpec{
-		Request:          "should be allowed when config is absent",
-		TargetNamespaces: []string{"staging"},
-		Analysis:         agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
+		Request:  "should be allowed when config is absent",
+		Analysis: agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
 	})
 	t.Log("CREATE succeeded with absent AgenticOLSConfig (parameterNotFoundAction Allow)")
 }
@@ -209,9 +207,8 @@ func TestSuspension_ResumeNewAgenticRun(t *testing.T) {
 
 	// Verify admission blocking while suspended (poll until VAP param cache catches up).
 	waitForSuspendedAdmissionReject(t, c, "suspend-before-resume", agenticv1alpha1.AgenticRunSpec{
-		Request:          "should be rejected while suspended",
-		TargetNamespaces: []string{"staging"},
-		Analysis:         agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
+		Request:  "should be rejected while suspended",
+		Analysis: agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
 	})
 	t.Log("confirmed admission blocking while suspended")
 
@@ -231,10 +228,9 @@ func TestSuspension_ResumeNewAgenticRun(t *testing.T) {
 	// Execution must be configured so the run waits for approval at Proposed
 	// rather than auto-completing (analysis-only runs skip directly to Completed).
 	waitForAdmissionAllow(t, c, "suspend-after-resume", agenticv1alpha1.AgenticRunSpec{
-		Request:          "resume after suspend",
-		TargetNamespaces: []string{"staging"},
-		Analysis:         agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
-		Execution:        agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
+		Request:   "resume after suspend",
+		Analysis:  agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
+		Execution: agenticv1alpha1.AgenticRunStep{Agent: "e2e-agent"},
 	})
 	waitForPhase(t, c, "suspend-after-resume", agenticv1alpha1.AgenticRunPhaseProposed)
 	t.Log("new run proceeded normally after resume")

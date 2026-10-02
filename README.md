@@ -26,7 +26,7 @@ sudo mv oc-agentic /usr/local/bin/
 
 ```bash
 # Create a proposal
-oc agentic run create --request="Fix crashloop in my-app namespace" --target-namespaces=my-app
+oc agentic run create --request="Fix crashloop in my-app namespace"
 
 # List proposals
 oc agentic run list
@@ -65,7 +65,7 @@ oc agentic version
 
 | Command | Description |
 | --------- | ------------- |
-| `proposal create` | Create a new proposal (`--request`, `--agent`, `--target-namespaces`) |
+| `proposal create` | Create a new proposal (`--request`, `--agent`) |
 | `proposal list` (`ls`) | List proposals (`-A`, `--phase`, `-o wide\|json\|yaml`) |
 | `proposal get` | Show proposal details (`-o json\|yaml`) |
 | `proposal approve` | Approve a step (`--stage`, `--option`, `--agent`, `--all`, `--wait`) |

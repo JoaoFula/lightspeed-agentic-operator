@@ -440,10 +440,9 @@ func TestManualApproval_AdvisoryOnly(t *testing.T) {
 	run := &agenticv1alpha1.AgenticRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "fix-crash", Namespace: "default"},
 		Spec: agenticv1alpha1.AgenticRunSpec{
-			Request:          "Investigate issue",
-			Tools:            testTools(),
-			TargetNamespaces: []string{"production"},
-			Analysis:         agenticv1alpha1.AgenticRunStep{Agent: "default"},
+			Request:  "Investigate issue",
+			Tools:    testTools(),
+			Analysis: agenticv1alpha1.AgenticRunStep{Agent: "default"},
 		},
 	}
 	agent := newTestAgentCaller()
@@ -469,10 +468,9 @@ func TestAutoApproval_AdvisoryOnly_SkipsAbsentStages(t *testing.T) {
 	run := &agenticv1alpha1.AgenticRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "advisory", Namespace: "default"},
 		Spec: agenticv1alpha1.AgenticRunSpec{
-			Request:          "Investigate issue",
-			Tools:            testTools(),
-			TargetNamespaces: []string{"production"},
-			Analysis:         agenticv1alpha1.AgenticRunStep{Agent: "default"},
+			Request:  "Investigate issue",
+			Tools:    testTools(),
+			Analysis: agenticv1alpha1.AgenticRunStep{Agent: "default"},
 		},
 	}
 	agent := newTestAgentCaller()
@@ -506,11 +504,10 @@ func TestManualApproval_TrustMode(t *testing.T) {
 	run := &agenticv1alpha1.AgenticRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "fix-crash", Namespace: "default"},
 		Spec: agenticv1alpha1.AgenticRunSpec{
-			Request:          "Fix with trust",
-			Tools:            testTools(),
-			TargetNamespaces: []string{"production"},
-			Analysis:         agenticv1alpha1.AgenticRunStep{Agent: "default"},
-			Execution:        agenticv1alpha1.AgenticRunStep{Agent: "default"},
+			Request:   "Fix with trust",
+			Tools:     testTools(),
+			Analysis:  agenticv1alpha1.AgenticRunStep{Agent: "default"},
+			Execution: agenticv1alpha1.AgenticRunStep{Agent: "default"},
 		},
 	}
 	agent := newTestAgentCaller()

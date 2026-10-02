@@ -229,9 +229,8 @@ type VerificationPlan struct {
 // so that users and policy can audit why the permission is needed.
 type RBACRule struct {
 	// namespace is the target namespace for namespace-scoped rules.
-	// Must match one of the run's targetNamespaces. Ignored for
-	// cluster-scoped rules. Validation is deferred to the operator's
-	// policy engine at runtime. Must be a valid RFC 1123 DNS label.
+	// Ignored for cluster-scoped rules. Validation is deferred to the
+	// operator's policy engine at runtime. Must be a valid RFC 1123 DNS label.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
@@ -293,7 +292,7 @@ type RBACRule struct {
 // +kubebuilder:validation:MinProperties=1
 type RBACResult struct {
 	// namespaceScoped are rules that will be applied via Role + RoleBinding
-	// in the run's target namespaces. These are the most common rules.
+	// in the namespaces declared by these rules. These are the most common rules.
 	// Maximum 50 items.
 	// +optional
 	// +listType=atomic

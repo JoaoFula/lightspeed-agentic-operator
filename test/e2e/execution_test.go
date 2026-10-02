@@ -50,7 +50,7 @@ func TestExecutionFlow_ProposedToVerifying(t *testing.T) {
 	roleName := "ls-exec-" + runUID
 	var role rbacv1.Role
 	if err := wait.PollUntilContextTimeout(ctx, pollInterval, pollTimeout, true, func(ctx context.Context) (bool, error) {
-		err := c.Get(ctx, types.NamespacedName{Name: roleName, Namespace: "staging"}, &role)
+		err := c.Get(ctx, types.NamespacedName{Name: roleName, Namespace: "default"}, &role)
 		if err == nil {
 			return true, nil
 		}
@@ -59,13 +59,13 @@ func TestExecutionFlow_ProposedToVerifying(t *testing.T) {
 		}
 		return false, err
 	}); err != nil {
-		t.Fatalf("timed out waiting for Role %s in staging: %v", roleName, err)
+		t.Fatalf("timed out waiting for Role %s in default: %v", roleName, err)
 	}
-	t.Logf("RBAC Role %s exists in staging namespace", roleName)
+	t.Logf("RBAC Role %s exists in default namespace", roleName)
 
 	var binding rbacv1.RoleBinding
 	if err := wait.PollUntilContextTimeout(ctx, pollInterval, pollTimeout, true, func(ctx context.Context) (bool, error) {
-		err := c.Get(ctx, types.NamespacedName{Name: roleName, Namespace: "staging"}, &binding)
+		err := c.Get(ctx, types.NamespacedName{Name: roleName, Namespace: "default"}, &binding)
 		if err == nil {
 			return true, nil
 		}
@@ -74,9 +74,9 @@ func TestExecutionFlow_ProposedToVerifying(t *testing.T) {
 		}
 		return false, err
 	}); err != nil {
-		t.Fatalf("timed out waiting for RoleBinding %s in staging: %v", roleName, err)
+		t.Fatalf("timed out waiting for RoleBinding %s in default: %v", roleName, err)
 	}
-	t.Logf("Verified: RoleBinding %s exists in staging", roleName)
+	t.Logf("Verified: RoleBinding %s exists in default", roleName)
 
 	// Verify: per-run execution SA created.
 	saName := "ls-exe-" + runUID
@@ -147,7 +147,7 @@ func TestExecutionFlow_ProposedToVerifying(t *testing.T) {
 	}
 	waitForDeletion(t, c, prop.Name)
 
-	if err := c.Get(ctx, types.NamespacedName{Name: roleName, Namespace: "staging"}, &role); err == nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: roleName, Namespace: "default"}, &role); err == nil {
 		t.Errorf("Role %s still exists after AgenticRun deletion — RBAC not cleaned up", roleName)
 	}
 	if err := c.Get(ctx, types.NamespacedName{Name: saName, Namespace: testNS}, &sa); err == nil {

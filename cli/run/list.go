@@ -150,22 +150,18 @@ func (o *ListOptions) printTable(items []agenticv1alpha1.AgenticRun) {
 func (o *ListOptions) printWideTable(items []agenticv1alpha1.AgenticRun) {
 	var headers []string
 	if o.allNamespaces {
-		headers = []string{"NAMESPACE", "NAME", "PHASE", "TARGET-NS", "AGE"}
+		headers = []string{"NAMESPACE", "NAME", "PHASE", "AGE"}
 	} else {
-		headers = []string{"NAME", "PHASE", "TARGET-NS", "AGE"}
+		headers = []string{"NAME", "PHASE", "AGE"}
 	}
 	rows := make([][]string, 0, len(items))
 	for _, p := range items {
-		targetNS := "-"
-		if len(p.Spec.TargetNamespaces) > 0 {
-			targetNS = strings.Join(p.Spec.TargetNamespaces, ",")
-		}
 		row := []string{}
 		if o.allNamespaces {
 			row = append(row, p.Namespace)
 		}
 		row = append(row, p.Name, ColoredPhase(agenticv1alpha1.DerivePhase(p.Status.Conditions)),
-			targetNS, HumanDuration(p.CreationTimestamp.Time))
+			HumanDuration(p.CreationTimestamp.Time))
 		rows = append(rows, row)
 	}
 	PrintTable(o.Out, headers, rows)

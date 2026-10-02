@@ -197,6 +197,28 @@ func TestAnalysisOutputSchema_OptionsStructure(t *testing.T) {
 	}
 }
 
+func TestAnalysisOutputSchema_NamespaceScopedRulesRequireNamespace(t *testing.T) {
+	var parsed map[string]any
+	if err := json.Unmarshal(AnalysisOutputSchema, &parsed); err != nil {
+		t.Fatalf("unmarshal AnalysisOutputSchema: %v", err)
+	}
+
+	rule, ok := digObject(parsed, "properties", "options", "items", "properties", "rbac", "properties", "namespaceScoped", "items")
+	if !ok {
+		t.Fatal("AnalysisOutputSchema is missing namespaceScoped rule schema")
+	}
+	required, ok := rule["required"].([]any)
+	if !ok {
+		t.Fatal("namespaceScoped rule schema is missing required fields")
+	}
+	for _, field := range required {
+		if field == "namespace" {
+			return
+		}
+	}
+	t.Error("namespaceScoped rules must require namespace")
+}
+
 func TestVerificationOutputSchema_ChecksUseResultNotPassed(t *testing.T) {
 	var parsed map[string]any
 	if err := json.Unmarshal(VerificationOutputSchema, &parsed); err != nil {

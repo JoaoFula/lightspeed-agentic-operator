@@ -89,8 +89,6 @@ spec:
     Describe the problem here. Include as much context as possible:
     what happened, what resources are affected, what namespace,
     any error messages or alert details.
-  targetNamespaces:
-    - affected-namespace
   analysis:
     agent: smart
   execution:
@@ -424,7 +422,6 @@ func handleViolation(w http.ResponseWriter, r *http.Request) {
         },
         Spec: v1alpha1.AgenticRunSpec{
             Request: formatViolation(violation),
-            TargetNamespaces: []string{violation.Namespace},
             Analysis: &v1alpha1.AgenticRunStep{
                 Agent: "smart",
             },
@@ -508,10 +505,6 @@ type AgenticRunSpec struct {
     // Primary input to the analysis agent.
     // Immutable after creation. Max 32768 chars.
     Request string
-
-    // Namespace(s) this run operates on.
-    // Immutable. Used for RBAC scoping. Max 50 namespaces.
-    TargetNamespaces []string
 
     // Default tools for all steps.
     // Immutable. Per-step tools replace this for individual steps.

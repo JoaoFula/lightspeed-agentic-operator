@@ -284,9 +284,8 @@ spec:
                               namespace:
                                 description: |-
                                   namespace is the target namespace for namespace-scoped rules.
-                                  Must match one of the run's targetNamespaces. Ignored for
-                                  cluster-scoped rules. Validation is deferred to the operator's
-                                  policy engine at runtime. Must be a valid RFC 1123 DNS label.
+                                  Ignored for cluster-scoped rules. Validation is deferred to the
+                                  operator's policy engine at runtime. Must be a valid RFC 1123 DNS label.
                                 maxLength: 63
                                 minLength: 1
                                 type: string
@@ -345,7 +344,7 @@ spec:
                         namespaceScoped:
                           description: |-
                             namespaceScoped are rules that will be applied via Role + RoleBinding
-                            in the run's target namespaces. These are the most common rules.
+                            in the namespaces declared by these rules. These are the most common rules.
                             Maximum 50 items.
                           items:
                             description: |-
@@ -379,9 +378,8 @@ spec:
                               namespace:
                                 description: |-
                                   namespace is the target namespace for namespace-scoped rules.
-                                  Must match one of the run's targetNamespaces. Ignored for
-                                  cluster-scoped rules. Validation is deferred to the operator's
-                                  policy engine at runtime. Must be a valid RFC 1123 DNS label.
+                                  Ignored for cluster-scoped rules. Validation is deferred to the
+                                  operator's policy engine at runtime. Must be a valid RFC 1123 DNS label.
                                 maxLength: 63
                                 minLength: 1
                                 type: string

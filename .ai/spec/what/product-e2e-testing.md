@@ -158,8 +158,9 @@ section records the operator's share.
   `hub.openshift.io/spoke-cluster` and `hub.openshift.io/agentic-run` labels; the
   periodic stale-SA sweep runs), and sandbox wiring against a real spoke.
 - **T1** asserts a full AgenticRun lifecycle with the **mock agent** against a
-  real spoke reaches `Completed`, and that the ephemeral token is RBAC-scoped
-  (succeeds inside `targetNamespaces`, denied outside).
+  real spoke reaches `Completed`, and that the ephemeral token is RBAC-scoped:
+  read access remains available across namespaces, but execution modifications
+  are denied outside namespaces named by approved namespace-scoped RBAC rules.
 - **T2** reuses the phase-transition assertions above (Pending → Analyzing →
   Proposed → Executing → Verifying → Completed) against a real hosted spoke with
   a real provider.

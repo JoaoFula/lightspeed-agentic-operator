@@ -3,7 +3,6 @@ package run
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	agenticv1alpha1 "github.com/openshift/lightspeed-agentic-operator/api/v1alpha1"
 	"github.com/spf13/cobra"
@@ -92,10 +91,6 @@ func (o *GetOptions) printDetail(p *agenticv1alpha1.AgenticRun) {
 	fmt.Fprintf(w, "Phase:             %s\n", ColoredPhase(agenticv1alpha1.DerivePhase(p.Status.Conditions)))
 	fmt.Fprintf(w, "Age:               %s\n", HumanDuration(p.CreationTimestamp.Time))
 	fmt.Fprintf(w, "Request:           %s\n", p.Spec.Request)
-
-	if len(p.Spec.TargetNamespaces) > 0 {
-		fmt.Fprintf(w, "\nTarget Namespaces: %s\n", strings.Join(p.Spec.TargetNamespaces, ", "))
-	}
 
 	// Analysis step
 	fmt.Fprintln(w)
