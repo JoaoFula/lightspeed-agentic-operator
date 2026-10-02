@@ -48,12 +48,36 @@ _cleanup_on_exit() {
     local rc=$?
     local cleanup_rc=0
     log_info "Running cleanup..."
+    local deferred_operator_cleanup=false
+    if [[ "${E2E_DISCONNECTED:-false}" == true && -n "${E2E_DISCONNECTED_OPERATOR_STATE:-}" ]]; then
+        deferred_operator_cleanup=true
+        # Save ownership before potentially interrupted resource cleanup. Publish
+        # atomically so the outer runner never sources a partial state file.
+        local state_tmp="$E2E_DISCONNECTED_OPERATOR_STATE.tmp"
+        for name in OPERATOR_NAMESPACE _OPERATOR_DEPLOYED_BY_SCRIPT \
+            _E2E_READER_RBAC_CREATED_BY_SCRIPT _E2E_MANAGER_RB_CREATED_BY_SCRIPT \
+            _E2E_MANAGER_ROLE_CREATED_BY_SCRIPT; do
+            printf '%s=%q\n' "$name" "${!name:-0}"
+        done > "$state_tmp" && mv "$state_tmp" "$E2E_DISCONNECTED_OPERATOR_STATE" || cleanup_rc=$?
+    fi
     # Keep the operator alive while aborted runs execute their finalizers.
     if [[ "${E2E_DISCONNECTED:-false}" == true ]]; then
-        bash "$SCRIPT_DIR/e2e-disconnected-cleanup.sh" || cleanup_rc=$?
+        if bash "$SCRIPT_DIR/e2e-disconnected-cleanup.sh"; then
+            if [[ -n "${E2E_DISCONNECTED_CLEANUP_MARKER:-}" ]]; then
+                touch "$E2E_DISCONNECTED_CLEANUP_MARKER" || cleanup_rc=$?
+            fi
+        else
+            cleanup_rc=$?
+        fi
     fi
     cleanup_e2e_otel "$NAMESPACE"
-    cleanup_operator
+    if [[ "$deferred_operator_cleanup" == false ]]; then
+        if [[ "$cleanup_rc" -eq 0 ]]; then
+            cleanup_operator
+        else
+            log_info "Preserving operator and CRDs after disconnected cleanup failure"
+        fi
+    fi
     if [[ -n "${SCENARIOS_TMPDIR:-}" && -d "$SCENARIOS_TMPDIR" ]]; then
         log_info "Removing scenarios clone: $SCENARIOS_TMPDIR"
         rm -rf "$SCENARIOS_TMPDIR"

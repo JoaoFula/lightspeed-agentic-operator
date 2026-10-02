@@ -157,6 +157,12 @@ func createTroubleshootingRun(t *testing.T, c client.Client, name, request strin
 	if err := c.Create(ctx, run); err != nil {
 		t.Fatalf("create AgenticRun %s: %v", name, err)
 	}
+	if os.Getenv("E2E_DISCONNECTED") == "true" {
+		if err := disconnected.RecordRun(run.Namespace, run.Name, string(run.UID)); err != nil {
+			// Leave the labelled run discoverable by the authoritative cleanup.
+			t.Fatalf("retain disconnected run ownership: %v", err)
+		}
+	}
 	t.Cleanup(func() { cleanup(t, c, run) })
 	t.Logf("AgenticRun created: %s/%s", testNS, name)
 

@@ -83,19 +83,20 @@ func (cfg Config) Start(t *testing.T, c client.Client, namespace, image string) 
 	if id == "" {
 		t.Fatal("E2E_DISCONNECTED_ID is required for independent cleanup")
 	}
-	var resources []client.Object
+	for _, name := range []string{"E2E_DISCONNECTED_RUNS_FILE", "E2E_DISCONNECTED_CLEANUP_SCRIPT"} {
+		if os.Getenv(name) == "" {
+			t.Fatalf("%s is required for safe disconnected cleanup", name)
+		}
+	}
 	t.Cleanup(func() {
 		if err := cfg.VerifyInference(ctx, c); err != nil {
 			t.Errorf("final inference selector check: %v", err)
 		}
 		cfg.diagnostics(t, c, namespace)
-		for i := len(resources) - 1; i >= 0; i-- {
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			err := c.Delete(cleanupCtx, resources[i])
-			cancel()
-			if client.IgnoreNotFound(err) != nil {
-				t.Logf("disconnected cleanup: %v", err)
-			}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		if err := Cleanup(cleanupCtx); err != nil {
+			t.Errorf("%v; preserving remaining resources for shell recovery", err)
 		}
 	})
 	create := func(obj client.Object) {
@@ -109,7 +110,6 @@ func (cfg Config) Start(t *testing.T, c client.Client, namespace, image string) 
 		if err := c.Create(ctx, obj); err != nil {
 			t.Fatalf("create disconnected resource %s: %v", obj.GetName(), err)
 		}
-		resources = append(resources, obj)
 	}
 	if err := cfg.VerifyInference(ctx, c); err != nil {
 		t.Fatal(err)

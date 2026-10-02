@@ -13,11 +13,14 @@ LSEval or sandbox output-quality suite. Behavioral contract:
    requested object with `git cat-file -e "${SHA}^{commit}"`, check out that SHA
    detached, and verify HEAD equals the requested SHA. There is no submodule or
    copied provisioning code.
-3. Invoke `tests/rhoai/scripts/provision-vllm.sh --profile gemma4 --output-env
-   <path>` from that checkout. This OLS-4228 interface must exist in the pinned
-   revision. The service owns operators, GPU preparation, connected image/model/
-   chat-template downloads, readiness and authenticated model-ID confirmation.
-4. Source the safely shell-quoted, non-secret handoff. Required values:
+3. Invoke the operator-owned `scripts/e2e-rhoai.sh` orchestration helper against
+   that checkout's `tests/rhoai/` assets. Like the provisioning section in the
+   service's `tests/scripts/test-lseval-periodic.sh`, this caller sequences the
+   individual service scripts/manifests; it does not invoke LSEval or require a
+   separate service provisioning entrypoint.
+4. The operator caller discovers the Service endpoint/ports/selector and verifies
+   the selected model through an authenticated models request. It writes a
+   safely shell-quoted, non-secret handoff consumed by the runner. Values:
    `RHOAI_VLLM_BASE_URL`, `RHOAI_VLLM_MODEL`, `RHOAI_VLLM_NAMESPACE`,
    `RHOAI_VLLM_SERVICE_NAME`, `RHOAI_VLLM_SERVICE_PORT`,
    `RHOAI_VLLM_NETWORK_PORT`, `RHOAI_VLLM_POD_SELECTOR_JSON`.
@@ -34,6 +37,59 @@ skill pullspecs to their mirrored internal pullspecs. Discovery remains the
 standard `evals/scenarios/*/evals.yaml` core-tag path. No scenario allowlist or
 exclusions are accepted.
 
+### Connected provisioning and service asset interface
+
+`e2e-rhoai.sh` validates all required scripts and namespace/operator/GPU/vLLM
+manifests before cluster changes. The caller bounds the helper and its child
+processes with `E2E_RHOAI_PROVISION_TIMEOUT` (default 120m, positive GNU timeout
+duration). This covers unbounded discovery loops in the reused scripts as well
+as model readiness. A timed-out stage exits with status 124 and is not retried.
+The helper performs:
+
+1. Source `scripts/model-profile.sh`, set `VLLM_MODEL_PROFILE=gemma-4-31b`, and
+   call `load_vllm_model_profile`. Missing/incompatible Gemma settings fail;
+   the classic Llama profile is never a fallback.
+2. Apply the service's NFD/NVIDIA namespace manifests, then invoke
+   `scripts/bootstrap.sh` and `scripts/gpu-setup.sh` with the service RHOAI
+   directory as their argument.
+3. Create the model-serving namespace and HF/vLLM Secrets from private files,
+   not credential-bearing command arguments.
+4. Download the profile's chat template using the HF token while connected and
+   create its ConfigMap with the profile's name/key. Source
+   `scripts/fetch-vllm-image.sh`, then invoke `scripts/deploy-vllm.sh` against
+   the service's profile-parameterized runtime and inference manifests.
+5. If the RawDeployment already exists, restart it after applying credentials
+   and wait for rollout so reused Pods receive the current Secret-backed
+   environment. Do not force a second download on an initial deployment. Wait
+   for InferenceService readiness (`E2E_RHOAI_READY_TIMEOUT`, default 60m), then
+   invoke `scripts/get-vllm-pod-info.sh` with a private `ENV_FILE` path.
+6. Read the actual Service and selected Pods. Construct the internal `/v1` URL
+   with the published **Service port**, not the target port currently used by
+   the service Pod-info helper's `KSVC_URL`. Resolve numeric or named Pod target
+   ports separately for policy enforcement; ambiguous or invalid ports fail.
+7. Use the nonempty Service selector as `matchLabels` in the handoff. Before
+   restriction, the Go harness verifies it matches exactly the backing Pods of
+   the owning InferenceService.
+8. Make an authenticated models request from a running, non-terminating inference
+   Pod, supplying the caller's current API key through exec stdin from its
+   private file. Do not use a potentially stale Pod environment key to validate
+   connectivity. Service DNS need not be resolvable on the host runner, and the
+   key is not passed in exec arguments. Reject a response that does not
+   advertise the profile's exact model ID.
+
+The current service manifests use RawDeployment with namespace `e2e-rhoai-dsc`,
+ServingRuntime `vllm-gpu`, InferenceService `vllm-model`, Service
+`vllm-model-predictor`, and container `kserve-container`. The pinned revision must
+preserve these interfaces or be coordinated with the caller. Service owns the
+reused scripts, manifests and model profiles; the operator owns orchestration,
+readiness/model confirmation, and handoff production. No service scripts or
+manifests are copied into the operator repository.
+
+Connected preparation requires `curl`, `envsubst` and GNU `timeout` (coreutils)
+in addition to the standard runner tools. The inference image must provide Python 3 for model confirmation.
+CI owns teardown of provisioned operators/GPU/model-serving resources; they are
+not treated as temporary restricted-test probe resources.
+
 ## Service revision pin ownership and updates
 
 `LIGHTSPEED_SERVICE_REF` is a caller-supplied input, not a hardcoded operator
@@ -49,8 +105,9 @@ not establish compatibility with the operator harness.
 
 ### Update procedure
 
-1. Initially select a merged `lightspeed-service` commit containing the OLS-4228
-   reusable provisioning entrypoint and handoff contract.
+1. Initially select a merged `lightspeed-service` commit containing the Gemma
+   profile and compatible individual RHOAI scripts/manifests described above.
+   No separate provisioning entrypoint or service-produced handoff is required.
 2. Propose pin updates through a reviewed PR when provisioning fixes, required
    model/runtime changes or coordinated contract changes need to be consumed.
    Unrelated service commits do not require a pin update.
@@ -121,29 +178,63 @@ shorter than all selected per-scenario deadlines plus cleanup/preflight overhead
 
 Per-run CRs/results and watch-observed sandbox status are archived before their
 cleanup. Before boundary cleanup, collect policies, selector checks, events,
-ServingRuntime/InferenceService status and selected Pod logs. This variant
-bypasses the connected runner's raw artifact collector/log watcher; test output,
+ServingRuntime/InferenceService status and selected Pod logs. The shell fallback
+also collects redacted inference logs when provisioning/readiness fails before
+successful Pod discovery. This variant bypasses the connected runner's raw
+artifact collector/log watcher; test output,
 sandbox logs and fallback diagnostics are credential-redacted. No Secret objects
 are archived.
 
-Cleanup is registered before temporary resources are created. It removes only
-successfully created probe/Secret/policy/ServiceAccount/RBAC resources, best-effort,
-without replacing the original result. Every resource carries a unique invocation
-label, including provider fixtures and AgenticRuns. Independent shell cleanup
-handles hard Go timeouts and INT/TERM, collects
-evidence before deletion, stops owned runs/sandboxes before removing policies
-while the operator can still process finalizers, verifies no owned resources
-remain, and turns an
-otherwise successful run into failure if cleanup leaves resources. The child
-runner is in a separate process group so cancellation stops it before cleanup.
-SIGKILL cannot be trapped. The shell removes temporary checkouts/key files and
-uses the standard operator cleanup. Service/GPU provisioning resources remain owned by
-service/CI. No failure triggers an unrestricted retry.
+Cleanup is registered before temporary resources are created. Normal Go cleanup
+collects diagnostics, then invokes the same authoritative shell cleanup used for
+hard Go timeouts and INT/TERM; it never deletes policies directly after a cleanup
+failure. Every harness-created resource carries a unique invocation label,
+including provider fixtures and AgenticRuns. Actual sandbox Pods carry the run
+UID label, not the invocation label.
+
+The outer runner exports a private `E2E_DISCONNECTED_RUNS_FILE` JSON-lines journal.
+Each newly created run's namespace/name/UID is durably recorded before registering
+its per-scenario deletion. Shell cleanup combines that journal with live
+invocation-labelled runs, and persists live-discovered identities before any
+deletion. This also covers interruption between run creation and Go journal
+recording, so recovery can still find sandbox Pods after their run CR has
+disappeared. It snapshots live run conditions, result objects, sandbox
+status/logs and run identities before deletion, including after hard timeouts
+that bypass Go cleanup. Evidence is credential-redacted; recovery attempts write
+under separate `fallback/retry.*` directories instead of overwriting the first
+pre-deletion snapshot. Artifact-write/redaction failures and failed required
+workflow API fetches stop cleanup before destructive commands. Optional unavailable
+logs (for example a container that never started) are retained as redacted error
+text without blocking teardown.
+
+Cleanup first marks owned runs deleting to prevent sandbox recreation, deletes
+and waits for run-UID-selected Pods in their recorded namespaces, waits for run
+finalizers, and checks again for residual sandbox Pods. Only then does it remove
+policies/probes/temporary credentials and verify no invocation-owned resources
+remain. A failed stop/wait/residual check preserves the remaining policies for
+recovery and turns an otherwise successful run into failure.
+
+The outer runner also exports a private `E2E_DISCONNECTED_CLEANUP_MARKER` shared
+with Go and the product runner. The authoritative script writes it only after
+all cleanup checks succeed. Later invocations skip cleanup when that marker
+exists, preserving the evidence. Failed or interrupted cleanup remains eligible
+for fallback, and existing test/cleanup exit-code handling is preserved.
+Before starting resource cleanup, the product runner atomically writes non-secret
+operator/RBAC ownership flags to a private `E2E_DISCONNECTED_OPERATOR_STATE` file
+instead of undeploying the disconnected operator itself. Early publication keeps
+ownership available if the inner cleanup is interrupted. The outer runner performs standard operator cleanup only after
+resource cleanup succeeds, including after recovery; on failure it leaves the
+operator and CRDs available to process finalizers and support further recovery.
+
+The connected provisioning helper and product runner use separate process groups
+so cancellation stops their children before cleanup. SIGKILL cannot be trapped.
+The shell removes temporary checkouts/key files. Service/GPU provisioning resources
+remain owned by service/CI. No failure triggers an unrestricted retry.
 
 ## Verification
 
 - `make test`: handoff/image/policy/selector/endpoint/probe-baseline/artifact tests.
 - `make test-product-e2e-unit`: OpenAI fixture and shell entrypoint tests without
   a cluster (pin validation, provisioning contract, handoff and exit status).
-- Live coverage requires a GPU OpenShift cluster, the pinned OLS-4228 service
-  implementation, mirrored images, and CI-provided model credentials.
+- Live coverage requires a GPU OpenShift cluster, a pinned service revision with
+  compatible Gemma/RHOAI assets, mirrored images, and CI-provided model credentials.

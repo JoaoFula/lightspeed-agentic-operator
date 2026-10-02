@@ -191,13 +191,14 @@ The runner configures the collector with its Postgres backend, because the defau
 ### Disconnected Gemma product E2E
 
 `make product-e2e-disconnected` clones `lightspeed-service` at a verified full
-commit SHA, invokes its OLS-4228 reusable Gemma provisioning entrypoint, then
-runs the existing core product suite under temporary sandbox/vLLM egress
+commit SHA. Its own calling script orchestrates that checkout's existing RHOAI
+scripts/manifests with `VLLM_MODEL_PROFILE=gemma-4-31b`, then runs the existing
+core product suite under temporary sandbox/vLLM egress
 NetworkPolicies. Model/image/template preparation happens while connected;
 there is no unrestricted retry after the boundary is installed.
 
 ```bash
-LIGHTSPEED_SERVICE_REF=<full-40-character-commit-containing-OLS-4228> \
+LIGHTSPEED_SERVICE_REF=<full-40-character-commit-with-compatible-Gemma-RHOAI-assets> \
 HUGGING_FACE_HUB_TOKEN=<CI-secret> VLLM_API_KEY=<CI-secret> \
 IMG=<operator-pullspec> \
 SANDBOX_IMAGE=image-registry.openshift-image-registry.svc:5000/tests/sandbox:gemma \
@@ -227,14 +228,34 @@ image must include Python 3 for authenticated preflight probes.
 a timeout too short for the discovered core scenarios. Scenario skips and
 non-core tags are rejected. Policies and probe resources are removed after
 redacted diagnostics are saved in `artifacts/disconnected/`. An invocation-labelled
-shell fallback handles hard test timeouts and INT/TERM; it stops owned runs before
-removing policies and preserves the original failure. The runner requires
-Python 3 and `setsid` (util-linux) as well as the standard E2E tools. The service/CI
-retains ownership of GPU and model-serving resources.
+shell cleanup path handles both normal teardown and hard test timeouts/INT/TERM.
+A private run-UID journal keeps lingering sandboxes discoverable after run CR
+removal. Cleanup archives run conditions/results and sandbox status/logs before
+deletion, stops runs, waits for their sandbox Pods, and checks for residual Pods
+before removing policies. Recovery snapshots use separate `fallback/retry.*`
+directories to preserve initial evidence. The outer runner undeploys the operator
+only after resource cleanup succeeds; failed recovery retains the operator/CRDs
+and remaining policies, while preserving the original failure. The runner requires
+Python 3, `setsid` (util-linux), `curl`, `envsubst` and GNU `timeout` (coreutils)
+as well as the standard E2E tools. CI retains responsibility for GPU and model-serving resource teardown.
 
-The pinned service commit must contain
-`tests/rhoai/scripts/provision-vllm.sh --profile gemma4 --output-env <path>`.
-An older revision fails clearly rather than falling back to Llama or LSEval.
+The pinned service commit must contain compatible `tests/rhoai/` assets:
+`model-profile.sh` with `gemma-4-31b`, `bootstrap.sh`, `gpu-setup.sh`,
+`fetch-vllm-image.sh`, `deploy-vllm.sh`, `get-vllm-pod-info.sh`, and their manifests.
+Missing assets or incompatible profile settings fail clearly rather than falling
+back to Llama or LSEval. There is no dependency on a separate service provisioning
+entrypoint.
+
+The operator-owned `scripts/e2e-rhoai.sh` creates the provisioning handoff from
+actual Service/Pod data and an authenticated models request inside the inference
+container using the caller's current API key via stdin. Existing inference
+Deployments are restarted so their Pods pick up updated Secret-backed credentials.
+The helper uses the Service port for the internal `/v1` URL and resolves the Pod
+target port separately for NetworkPolicy. `E2E_RHOAI_READY_TIMEOUT` controls
+rollout/InferenceService readiness waiting (default `60m`).
+`E2E_RHOAI_PROVISION_TIMEOUT` bounds provisioning scripts and their children
+(default `120m`); expiration preserves exit status 124 and saves redacted
+inference logs alongside the failure diagnostics.
 
 Cluster-free harness tests: `make test` and `make test-product-e2e-unit`.
 See [the implementation contract](.ai/spec/how/disconnected-product-e2e.md).
