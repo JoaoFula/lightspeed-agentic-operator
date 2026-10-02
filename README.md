@@ -188,6 +188,57 @@ artifacts/<provider>/
 
 The runner configures the collector with its Postgres backend, because the default `nop` pipeline drops records and does not expose the admin API used to export per-run records. Direct pod-log capture is best effort: sandbox pods may be removed immediately after completion, so persisted OTEL records are the primary diagnostic source.
 
+### Disconnected Gemma product E2E
+
+`make product-e2e-disconnected` clones `lightspeed-service` at a verified full
+commit SHA, invokes its OLS-4228 reusable Gemma provisioning entrypoint, then
+runs the existing core product suite under temporary sandbox/vLLM egress
+NetworkPolicies. Model/image/template preparation happens while connected;
+there is no unrestricted retry after the boundary is installed.
+
+```bash
+LIGHTSPEED_SERVICE_REF=<full-40-character-commit-containing-OLS-4228> \
+HUGGING_FACE_HUB_TOKEN=<CI-secret> VLLM_API_KEY=<CI-secret> \
+IMG=<operator-pullspec> \
+SANDBOX_IMAGE=image-registry.openshift-image-registry.svc:5000/tests/sandbox:gemma \
+E2E_SKILL_IMAGE_MAP="$PWD/mirrored-skills.json" \
+ARTIFACT_DIR="$PWD/artifacts" \
+make product-e2e-disconnected
+```
+
+Supply credentials through the CI secret environment, not checked-in files.
+CI must mirror the sandbox and core-scenario skill images beforehand.
+`mirrored-skills.json` maps original skill pullspecs to internal ones:
+
+```json
+{
+  "quay.io/example/skills:v1": "image-registry.openshift-image-registry.svc:5000/tests/skills:v1"
+}
+```
+
+Unmapped references must already be internal; public references fail before
+scenario setup or run creation. The actual configuration ConfigMap must use
+`bare-pod` mode and local images. Use dedicated namespaces with no existing
+egress policies or optional OTEL/MCP/RHOKP endpoints. The mirrored sandbox
+image must include Python 3 for authenticated preflight probes.
+
+`E2E_EGRESS_CANARY` optionally overrides the baseline HTTPS URL (default
+`https://example.com/`). `E2E_SUITE_TIMEOUT` defaults to `12h`; the test rejects
+a timeout too short for the discovered core scenarios. Scenario skips and
+non-core tags are rejected. Policies and probe resources are removed after
+redacted diagnostics are saved in `artifacts/disconnected/`. An invocation-labelled
+shell fallback handles hard test timeouts and INT/TERM; it stops owned runs before
+removing policies and preserves the original failure. The runner requires
+Python 3 and `setsid` (util-linux) as well as the standard E2E tools. The service/CI
+retains ownership of GPU and model-serving resources.
+
+The pinned service commit must contain
+`tests/rhoai/scripts/provision-vllm.sh --profile gemma4 --output-env <path>`.
+An older revision fails clearly rather than falling back to Llama or LSEval.
+
+Cluster-free harness tests: `make test` and `make test-product-e2e-unit`.
+See [the implementation contract](.ai/spec/how/disconnected-product-e2e.md).
+
 For noisy debugging: **`go test ./controller/agenticrun/... -v`**, **`go test ./api/... -v`**, **`go test ./cli/... -v`**.
 
 ### API lint (Kube API linter)
