@@ -221,7 +221,11 @@ func waitForPhase(t *testing.T, c client.Client, name string, target agenticv1al
 
 func waitForPhaseWithTimeout(t *testing.T, c client.Client, name string, target agenticv1alpha1.AgenticRunPhase, timeout time.Duration) agenticv1alpha1.AgenticRun {
 	t.Helper()
-	ctx := context.Background()
+	return waitForPhaseWithContext(context.Background(), t, c, name, target, timeout)
+}
+
+func waitForPhaseWithContext(ctx context.Context, t *testing.T, c client.Client, name string, target agenticv1alpha1.AgenticRunPhase, timeout time.Duration) agenticv1alpha1.AgenticRun {
+	t.Helper()
 	var updated agenticv1alpha1.AgenticRun
 
 	err := wait.PollUntilContextTimeout(ctx, pollInterval, timeout, true, func(ctx context.Context) (bool, error) {
@@ -239,6 +243,9 @@ func waitForPhaseWithTimeout(t *testing.T, c client.Client, name string, target 
 		return false, nil
 	})
 	if err != nil {
+		if cause := context.Cause(ctx); cause != nil {
+			err = cause
+		}
 		phase := agenticv1alpha1.DerivePhase(updated.Status.Conditions)
 		t.Fatalf("waiting for phase %s failed: %v; current=%s conditions=%v", target, err, phase, updated.Status.Conditions)
 	}

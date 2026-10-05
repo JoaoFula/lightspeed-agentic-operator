@@ -2,6 +2,7 @@ package disconnected
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,25 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+func TestProbeHonorsWatchCancellation(t *testing.T) {
+	bin := t.TempDir()
+	marker := filepath.Join(bin, "probe-started")
+	if err := os.WriteFile(filepath.Join(bin, "oc"), []byte("#!/bin/sh\necho unexpected > \"$PROBE_MARKER\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	t.Setenv("PROBE_MARKER", marker)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(errors.New("sandbox watch failed"))
+	err := validConfig().probe(ctx, &corev1.Pod{}, "baseline")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("preflight ignored watch cancellation: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("preflight started after watch failure: %v", err)
+	}
+}
 
 func TestArchiveRunRedactsCredentials(t *testing.T) {
 	dir := t.TempDir()

@@ -169,6 +169,11 @@ A Pod watch checks every `ls-*` sandbox's stable run label, container/init/
 ephemeral-container and image-volume pullspecs, host networking and image-pull
 errors. Normal watch disconnects resume from the last resourceVersion; unrecoverable
 errors/expired history fail rather than silently losing boundary coverage.
+Watcher failures cancel a shared suite context: preflight, scenario setup and
+phase polling stop, and the test goroutine aborts remaining scenarios. Boundary
+violations and image-pull failures use the same fail-fast path. Diagnostics and
+registered cleanup retain independent contexts; intentional watcher shutdown
+during cleanup is not a failure.
 The standard product suite then owns scenario execution and result assertions.
 
 `E2E_SUITE_TIMEOUT` defaults to 12h for this variant. The test rejects a deadline
@@ -235,6 +240,7 @@ remain owned by service/CI. No failure triggers an unrestricted retry.
 
 - `make test`: handoff/image/policy/selector/endpoint/probe-baseline/artifact tests.
 - `make test-product-e2e-unit`: OpenAI fixture and shell entrypoint tests without
-  a cluster (pin validation, provisioning contract, handoff and exit status).
+  a cluster (pin validation, provisioning contract, handoff, exit status, watcher
+  reconnection/failure and cancellation with retained cleanup).
 - Live coverage requires a GPU OpenShift cluster, a pinned service revision with
   compatible Gemma/RHOAI assets, mirrored images, and CI-provided model credentials.

@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,7 +49,7 @@ func TestOpenAIFixtureCustomURL(t *testing.T) {
 	}
 }
 
-func prepareDisconnected(t *testing.T, c client.Client, scenarios []discoveredScenario) {
+func prepareDisconnected(t *testing.T, c client.Client, scenarios []discoveredScenario) context.Context {
 	t.Helper()
 	cfg, err := disconnected.FromEnv()
 	if err != nil {
@@ -93,11 +94,22 @@ func prepareDisconnected(t *testing.T, c client.Client, scenarios []discoveredSc
 			skill.Image = image
 		}
 	}
-	watchDisconnectedSandboxes(t, cfg)
-	cfg.Start(t, c, testNS, spec.Containers[0].Image)
+	ctx := watchDisconnectedSandboxes(t, cfg)
+	cfg.Start(ctx, t, c, testNS, spec.Containers[0].Image)
+	requireDisconnectedWatch(t, ctx)
+	return ctx
 }
 
-func watchDisconnectedSandboxes(t *testing.T, cfg disconnected.Config) {
+// Only the test goroutine may abort the suite; Fatal in the watcher goroutine
+// would leave the scenario loop running without boundary monitoring.
+func requireDisconnectedWatch(t *testing.T, ctx context.Context) {
+	t.Helper()
+	if err := context.Cause(ctx); err != nil {
+		t.Fatalf("disconnected sandbox monitoring failed; aborting scenario execution: %v", err)
+	}
+}
+
+func watchDisconnectedSandboxes(t *testing.T, cfg disconnected.Config) context.Context {
 	t.Helper()
 	kubeconfig := os.Getenv("KUBECONFIG")
 	if kubeconfig == "" {
@@ -112,32 +124,32 @@ func watchDisconnectedSandboxes(t *testing.T, cfg disconnected.Config) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancelCause(context.Background())
 	pods, err := cs.CoreV1().Pods(testNS).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		cancel()
+		cancel(nil)
 		t.Fatal(err)
 	}
-	check := func(p *corev1.Pod) {
+	check := func(p *corev1.Pod) error {
 		if !strings.HasPrefix(p.Name, "ls-") {
-			return
+			return nil
 		}
 		disconnected.ArchivePod(t, p)
 		if err := cfg.ValidatePod(p); err != nil {
-			t.Errorf("disconnected sandbox boundary: %v", err)
+			return fmt.Errorf("disconnected sandbox boundary: %w", err)
 		}
 		for _, status := range append(p.Status.ContainerStatuses, p.Status.InitContainerStatuses...) {
 			if status.State.Waiting != nil && (status.State.Waiting.Reason == "ErrImagePull" || status.State.Waiting.Reason == "ImagePullBackOff") {
-				t.Errorf("disconnected sandbox image pull failed: %s/%s", p.Name, status.Name)
+				return fmt.Errorf("disconnected sandbox image pull failed: %s/%s", p.Name, status.Name)
 			}
 		}
+		return nil
 	}
 	for i := range pods.Items {
-		check(&pods.Items[i])
-	}
-	if t.Failed() {
-		cancel()
-		t.Fatal("pre-existing sandbox violates disconnected boundary")
+		if err := check(&pods.Items[i]); err != nil {
+			cancel(nil)
+			t.Fatalf("pre-existing sandbox violates disconnected boundary: %v", err)
+		}
 	}
 	// Resume from the last resourceVersion after normal API watch timeouts;
 	// an expired history (410 Gone) still fails instead of silently relisting.
@@ -145,30 +157,48 @@ func watchDisconnectedSandboxes(t *testing.T, cfg disconnected.Config) {
 		return cs.CoreV1().Pods(testNS).Watch(ctx, options)
 	}})
 	if err != nil {
-		cancel()
+		cancel(nil)
 		t.Fatal(err)
 	}
-	done := make(chan struct{})
+	done := make(chan error, 1)
 	go func() {
-		defer close(done)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case event, ok := <-watcher.ResultChan():
-				if !ok {
-					if ctx.Err() == nil {
-						t.Error("sandbox boundary watch closed unexpectedly")
-					}
-					return
-				}
-				if pod, ok := event.Object.(*corev1.Pod); ok {
-					check(pod)
-				} else {
-					t.Errorf("sandbox boundary watch error: %v", event.Object)
-				}
+		err := consumeDisconnectedSandboxEvents(ctx, watcher.ResultChan(), check)
+		if err != nil {
+			cancel(err)
+		}
+		done <- err
+	}()
+	t.Cleanup(func() {
+		cancel(nil)
+		watcher.Stop()
+		// Retain late failures even if teardown cancellation wins the race to
+		// set the context's cause after the last scenario's context check.
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	})
+	return ctx
+}
+
+func consumeDisconnectedSandboxEvents(ctx context.Context, events <-chan watch.Event, check func(*corev1.Pod) error) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case event, ok := <-events:
+			if ctx.Err() != nil {
+				return nil
+			}
+			if !ok {
+				return fmt.Errorf("sandbox boundary watch closed unexpectedly")
+			}
+			pod, ok := event.Object.(*corev1.Pod)
+			if !ok || event.Type == watch.Error {
+				return fmt.Errorf("sandbox boundary watch error: %v", event.Object)
+			}
+			if err := check(pod); err != nil {
+				return err
 			}
 		}
-	}()
-	t.Cleanup(func() { cancel(); watcher.Stop(); <-done })
+	}
 }

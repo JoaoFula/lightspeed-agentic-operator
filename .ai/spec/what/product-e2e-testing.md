@@ -84,7 +84,10 @@ and behavioral correctness of fixes remain out of scope.
 7. During tests, sandbox Pod inspection MUST fail on missing stable run labels,
    external container/skill pullspecs, host networking, image-pull failures or
    lost inspection coverage. Normal watch reconnects MUST retain the last
-   resourceVersion; expired event history MUST fail.
+   resourceVersion; expired event history MUST fail. Unrecoverable watch
+   failures or boundary violations MUST cancel active scenario work and abort
+   remaining scenarios, while preserving diagnostics and registered cleanup.
+   Intentional watcher shutdown during cleanup MUST NOT fail the suite.
 8. Failures after restriction MUST remain failures. The harness MUST NOT
    restore external access and retry. Cleanup MUST preserve the original exit
    status and remove only harness-created policies/probes/temporary credentials.

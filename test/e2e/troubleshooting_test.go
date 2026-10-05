@@ -26,9 +26,11 @@ func TestTroubleshooting_PhaseTransitions(t *testing.T) {
 
 	c := newClient(t)
 	scenarios := discoverScenarios(t, scenariosDir)
+	suiteCtx := context.Background()
 	if os.Getenv("E2E_DISCONNECTED") == "true" {
-		prepareDisconnected(t, c, scenarios)
+		suiteCtx = prepareDisconnected(t, c, scenarios)
 	}
+	requireDisconnectedWatch(t, suiteCtx)
 	createTroubleshootingFixtures(t, c)
 	if os.Getenv("E2E_DISCONNECTED") != "true" {
 		stopWatcher := watchAndCaptureSandboxLogs(t)
@@ -51,8 +53,9 @@ func TestTroubleshooting_PhaseTransitions(t *testing.T) {
 		}
 	}
 	for _, sc := range scenarios {
+		requireDisconnectedWatch(t, suiteCtx)
 		t.Run(sc.Name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), scenarioTimeout)
+			ctx, cancel := context.WithTimeout(suiteCtx, scenarioTimeout)
 			defer cancel()
 
 			setupScript := sc.Dir + "/setup.sh"
@@ -74,6 +77,7 @@ func TestTroubleshooting_PhaseTransitions(t *testing.T) {
 				}
 			})
 
+			requireDisconnectedWatch(t, suiteCtx)
 			t.Logf("Running setup: %s", setupScript)
 			setupCmd := exec.CommandContext(ctx, "bash", setupScript)
 			setupCmd.Stdout = os.Stdout
@@ -91,8 +95,9 @@ func TestTroubleshooting_PhaseTransitions(t *testing.T) {
 				})
 			}
 
+			requireDisconnectedWatch(t, suiteCtx)
 			runName := fmt.Sprintf("e2e-ts-%s", strings.ReplaceAll(sc.Name, "_", "-"))
-			run := createTroubleshootingRun(t, c, runName, sc.Spec.Request, tools)
+			run := createTroubleshootingRun(ctx, t, c, runName, sc.Spec.Request, sc.Spec.TargetNamespaces, tools)
 			// Registered after createTroubleshootingRun's cleanup, so this runs
 			// first and exports templogs before the AgenticRun finalizer deletes
 			// them from the collector.
@@ -109,7 +114,8 @@ func TestTroubleshooting_PhaseTransitions(t *testing.T) {
 
 			expectedPhase := sc.ExpectedPhase
 			t.Logf("Waiting for phase: %s", expectedPhase)
-			updated := waitForPhaseWithTimeout(t, c, run.Name, expectedPhase, remaining)
+			updated := waitForPhaseWithContext(ctx, t, c, run.Name, expectedPhase, remaining)
+			requireDisconnectedWatch(t, suiteCtx)
 			t.Logf("Phase reached: %s", expectedPhase)
 
 			if expectedPhase == agenticv1alpha1.AgenticRunPhaseCompleted {
@@ -121,14 +127,15 @@ func TestTroubleshooting_PhaseTransitions(t *testing.T) {
 				assertAnalysisResultExists(t, c, string(run.UID))
 			}
 
+			requireDisconnectedWatch(t, suiteCtx)
 			t.Logf("PASS: %s — phase transition to %s", sc.Name, expectedPhase)
 		})
+		requireDisconnectedWatch(t, suiteCtx)
 	}
 }
 
-func createTroubleshootingRun(t *testing.T, c client.Client, name, request string, tools agenticv1alpha1.ToolsSpec) *agenticv1alpha1.AgenticRun {
+func createTroubleshootingRun(ctx context.Context, t *testing.T, c client.Client, name, request string, targetNamespaces []string, tools agenticv1alpha1.ToolsSpec) *agenticv1alpha1.AgenticRun {
 	t.Helper()
-	ctx := context.Background()
 	labels := map[string]string{}
 	if os.Getenv("E2E_DISCONNECTED") == "true" {
 		labels[disconnected.OwnedLabel] = os.Getenv("E2E_DISCONNECTED_ID")

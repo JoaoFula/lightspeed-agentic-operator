@@ -76,9 +76,8 @@ func probeLabels(selector metav1.LabelSelector) (map[string]string, error) {
 
 // Start installs a temporary runtime boundary and registers evidence collection
 // before cleanup. Call only after all scenario/base images have been validated.
-func (cfg Config) Start(t *testing.T, c client.Client, namespace, image string) {
+func (cfg Config) Start(ctx context.Context, t *testing.T, c client.Client, namespace, image string) {
 	t.Helper()
-	ctx := context.Background()
 	id := os.Getenv("E2E_DISCONNECTED_ID")
 	if id == "" {
 		t.Fatal("E2E_DISCONNECTED_ID is required for independent cleanup")
@@ -89,7 +88,8 @@ func (cfg Config) Start(t *testing.T, c client.Client, namespace, image string) 
 		}
 	}
 	t.Cleanup(func() {
-		if err := cfg.VerifyInference(ctx, c); err != nil {
+		// Evidence and cleanup must outlive a failed/canceled boundary watch.
+		if err := cfg.VerifyInference(context.Background(), c); err != nil {
 			t.Errorf("final inference selector check: %v", err)
 		}
 		cfg.diagnostics(t, c, namespace)
@@ -198,7 +198,7 @@ func (cfg Config) Start(t *testing.T, c client.Client, namespace, image string) 
 		if err != nil {
 			t.Fatalf("probe startup: %v", err)
 		}
-		if err := cfg.probe(p, "baseline"); err != nil {
+		if err := cfg.probe(ctx, p, "baseline"); err != nil {
 			t.Fatalf("connected canary baseline: %v", err)
 		}
 	}
@@ -212,8 +212,8 @@ func (cfg Config) Start(t *testing.T, c client.Client, namespace, image string) 
 		if i == 0 {
 			mode = "models"
 		}
-		err := wait.PollUntilContextTimeout(ctx, 2*time.Second, 90*time.Second, true, func(context.Context) (bool, error) {
-			err := cfg.probe(p, mode)
+		err := wait.PollUntilContextTimeout(ctx, 2*time.Second, 90*time.Second, true, func(ctx context.Context) (bool, error) {
+			err := cfg.probe(ctx, p, mode)
 			if err != nil {
 				t.Logf("waiting for restricted preflight: %v", err)
 			}
@@ -284,8 +284,8 @@ else:
 print('preflight '+mode+' OK')
 `
 
-func (cfg Config) probe(pod *corev1.Pod, mode string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+func (cfg Config) probe(ctx context.Context, pod *corev1.Pod, mode string) error {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	canary := os.Getenv("E2E_EGRESS_CANARY")
 	if canary == "" {
