@@ -157,7 +157,7 @@ belong to evals (epic OLS-3758).
      gemini:           { family: google,    primary: gemini-3.1-flash-lite }  # Vertex
      openai:           { family: openai,    primary: gpt-6-luna }
      azure-openai:     { family: openai,    primary: gpt-6-luna }
-     bedrock-deepseek: { family: deepseek,  primary: deepseek.v3.2, smoke: false }
+     bedrock-openai:   { family: openai,    primary: <bedrock-openai-model-id> }
    families:
      anthropic: { referenceRoute: anthropic, extras: [claude-sonnet-5-5, claude-opus-4-6] }
      google:    { referenceRoute: gemini,    extras: [gemini-3.8-flash] }
@@ -180,12 +180,18 @@ belong to evals (epic OLS-3758).
    primary model. Every extra model is proven on one route of its family.
 6. In-scope routes are direct Anthropic (`anthropic`), Vertex/Anthropic
    (`claude`), Bedrock/Anthropic (`bedrock-claude`), Vertex/Gemini
-   (`gemini`), native OpenAI (`openai`) and Azure OpenAI (`azure-openai`).
-   `bedrock-deepseek` is a product-e2e route with `smoke: false`. Bedrock
-   OpenAI and OpenAI-compatible/vLLM routes are out of scope.
+   (`gemini`), native OpenAI (`openai`), Azure OpenAI (`azure-openai`) and
+   Bedrock/OpenAI (`bedrock-openai`). `bedrock-openai` replaces the former
+   `bedrock-deepseek` product-e2e route. It reuses the Bedrock credentials
+   and fixture wiring, and it is smoke-enabled. OpenAI-compatible/vLLM routes
+   are out of scope.
 7. The real-provider fixtures MUST support `E2E_PROVIDER=anthropic`: a Secret
    with key `ANTHROPIC_API_KEY` and `LLMProvider.spec.type=Anthropic`. Existing
-   fixtures cover the other in-scope routes.
+   fixtures cover the other in-scope routes. `anthropic` is also a standard
+   `make product-e2e` route: it is in the runner's default provider list, takes
+   its key from `ANTHROPIC_PROVIDER_KEY_PATH` (Konflux secret
+   `anthropic-apitoken`), and the key is redacted like other provider
+   credentials.
 
 ### Scenario
 
@@ -237,18 +243,55 @@ belong to evals (epic OLS-3758).
     are deleted. The job also writes `smoke-summary.json` and
     `smoke-summary.md`: a route × model table with result, failure class and
     duration, plus the operator commit and the model-versions file content.
-    Secret contents and known credentials MUST NOT appear in artifacts.
+    Each table row carries the date of its result. Swapped models stay in the
+    same table as locked rows (rule 21). Secret contents and known credentials MUST NOT appear in
+    artifacts.
 17. The job runs on Konflux as an optional (non-gating)
     `IntegrationTestScenario` named `agentic-model-smoke`. It uses the same
-    nightly snapshot trigger as `agentic-product-e2e`.
+    nightly snapshot trigger as `agentic-product-e2e`. Each run pushes its
+    artifacts under a per-commit tag and also moves the stable tag
+    `agentic-model-smoke-latest`, so the newest summary can be fetched without
+    knowing the commit.
 18. When any entry fails, a final pipeline step MUST send a notification
-    containing the summary table and a link to the PipelineRun. It reuses or
-    mirrors the existing FBC-test failure-notification mechanism. A passing
-    job sends no notification.
+    containing the summary table and a link to the PipelineRun. It reuses the
+    FBC-test failure-notification mechanism (`slack-webhook-notification`
+    task, secret `slack-fbc-tests-webhook-url`, channel
+    `#ols-fbc-test-results`). A passing job sends no notification.
+
+### Swapped-model history
+
+19. When a model leaves a slot (`routes.<route>.primary` or
+    `families.<family>.extras`), a record MUST be added to
+    `test/models/model-history.yaml`. The record is kept separate from
+    `model-versions.yaml` and has these fields: slot, swapped-out model,
+    optional replacement, `swappedAt` (date of the swap), `expiresAt`
+    (`swappedAt` + 6 months) and `lastRun`. `lastRun` holds the date, the
+    route and `passed | failed` from the newest smoke summary. It is `null` when
+    that summary has no entry for the model. No logs or artifact references
+    are kept.
+20. Records are written once, at swap time, in the same change that edits
+    `model-versions.yaml`, using a repository helper that performs the swap,
+    appends the record and drops expired records. CI MUST NOT write
+    to the repository.
+21. Consumers render a single route × model table with a date column. A
+    row for an active model shows its newest result and that result's date.
+    When the model is swapped, its row becomes locked: it keeps the
+    `lastRun` result and date from the history record, it is marked as
+    swapped (with the swap date and replacement), and it is no longer
+    updated. The replacement model gets its own row. Locked rows disappear
+    once the record expires. There is no separate swapped-models listing.
+22. A model removed from `model-versions.yaml` without a matching history
+    record, and expired records still present, produce warnings only. They
+    never fail validation or the job.
+23. The weekly test report (`openshift-lightspeed/weekly-test-reporting`)
+    MUST include the smoke results as the single table from rule 21. Active
+    rows come from the newest smoke summary, and locked rows come from the
+    unexpired history records. A missing summary is shown as unknown, never as
+    passed.
 
 ### Constraints and exclusions
 
-- Credentials for all six in-scope routes must be available to the Konflux
+- Credentials for all seven in-scope routes must be available to the Konflux
   tenant pipeline.
 - The scenario's skill image is referenced by a mutable tag in
   `troubleshooting-scenarios`. A broken skill push can fail every entry with
@@ -257,7 +300,7 @@ belong to evals (epic OLS-3758).
   (OLS-4818) are separate work. Consumers outside this repository read the
   file from this repository.
 - Out of scope: execution and verification phases, LLM judges, RCA
-  correctness, Bedrock OpenAI, OpenAI-compatible/vLLM and Gemma routes.
+  correctness, OpenAI-compatible/vLLM and Gemma routes.
 
 ## Multicluster e2e (agentic-operator share)
 
